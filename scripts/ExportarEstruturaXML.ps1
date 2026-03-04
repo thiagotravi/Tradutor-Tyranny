@@ -1,5 +1,16 @@
-# Caminho base
+# Caminho base do Tyranny (ajuste se necessario)
 $path = "C:\Program Files (x86)\Steam\steamapps\common\Tyranny\Data\data\exported\localized\en\text"
+
+# Pega caminhos do projeto
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$projectRoot = Split-Path -Parent $scriptDir
+$dataDir = Join-Path $projectRoot "data"
+$outputFile = Join-Path $dataDir "Tyranny_Structure.xml"
+
+# Garante pasta data/
+if (!(Test-Path $dataDir)) {
+    New-Item -ItemType Directory -Path $dataDir | Out-Null
+}
 
 # Cria documento XML
 $xmlDoc = New-Object System.Xml.XmlDocument
@@ -29,5 +40,6 @@ function Get-XmlStructure($folder, $xmlDoc) {
 $root = Get-XmlStructure (Get-Item $path) $xmlDoc
 $xmlDoc.AppendChild($root) | Out-Null
 
-# Salva em arquivo
-$xmlDoc.Save("C:\temp\Tyranny_Structure.xml")
+# Salva em arquivo dentro de data/
+$xmlDoc.Save($outputFile)
+Write-Host "Estrutura exportada para: $outputFile"
