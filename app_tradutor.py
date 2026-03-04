@@ -10,6 +10,7 @@ from app_core.filesystem import (
     relpath_display,
 )
 from app_core.glossary import verificar_termos_faltantes
+from app_core.output_packaging import gerar_zip_da_saida, salvar_xml_traduzido
 from app_core.settings import criar_client, obter_api_key, obter_model_name
 from app_core.translator import (
     TranslationAPIError,
@@ -74,6 +75,8 @@ def render_directory_selector():
             st.session_state.source_en_root = str(source_en_root)
             st.session_state.discovered_files = [str(p) for p in arquivos]
             st.session_state.selected_file_path = st.session_state.discovered_files[0] if arquivos else None
+            if not st.session_state.get("output_root"):
+                st.session_state.output_root = str(Path.cwd() / "build" / "pt-BR")
         except ValueError as exc:
             st.error(str(exc))
             st.session_state.discovered_files = []
@@ -87,6 +90,12 @@ def render_directory_selector():
 
     st.caption(f"Source EN detectado: `{source_en_root}`")
     st.caption(f"Arquivos encontrados em EN: {len(arquivos)}")
+    output_root = st.text_input(
+        "Diretorio de saida espelho",
+        value=st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
+        key="output_root_input",
+    )
+    st.session_state.output_root = output_root.strip()
 
     filtro = st.text_input("Filtrar arquivos", value="", key="dir_file_filter")
     opcoes = []
@@ -110,6 +119,7 @@ def render_directory_selector():
             st.session_state.batch_queue = [full for _, full in opcoes]
             st.session_state.batch_cursor = 0
             st.session_state.batch_active = len(st.session_state.batch_queue) > 0
+            st.session_state.batch_zip_path = ""
             st.rerun()
     with col_stop:
         if st.button("Parar lote"):
@@ -174,6 +184,8 @@ if "batch_queue" not in st.session_state:
     st.session_state.batch_queue = []
 if "batch_cursor" not in st.session_state:
     st.session_state.batch_cursor = 0
+if "batch_zip_path" not in st.session_state:
+    st.session_state.batch_zip_path = ""
 
 render_sidebar_progress()
 client, model_name = init_translation_client()
@@ -303,6 +315,19 @@ while st.session_state.idx < len(st.session_state.entries):
 else:
     st.success("Arquivo finalizado!")
     st.session_state.progresso.update_status(st.session_state.progress_key, True)
+    if source_mode == "Diretorio" and selected_path:
+        try:
+            destino = salvar_xml_traduzido(
+                tree=st.session_state.tree,
+                source_file=selected_path,
+                source_en_root=st.session_state.get("source_en_root", ""),
+                output_root=st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
+            )
+            st.caption(f"Salvo em: `{destino}`")
+        except Exception as exc:
+            st.error("Falha ao salvar arquivo traduzido na estrutura espelho.")
+            st.caption(f"Detalhe tecnico: {exc}")
+
     if source_mode == "Diretorio" and st.session_state.get("batch_active"):
         queue = st.session_state.get("batch_queue", [])
         cursor = st.session_state.get("batch_cursor", 0)
@@ -321,7 +346,29 @@ else:
             st.session_state.batch_active = False
             st.session_state.batch_queue = []
             st.session_state.batch_cursor = 0
+            try:
+                zip_path = gerar_zip_da_saida(
+                    output_root=st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
+                    zip_name="traducao_ptbr.zip",
+                )
+                st.session_state.batch_zip_path = str(zip_path)
+            except Exception as exc:
+                st.error("Nao foi possivel gerar o zip da traducao.")
+                st.caption(f"Detalhe tecnico: {exc}")
             st.success("Lote finalizado com sucesso.")
 
 xml_output = ET.tostring(st.session_state.root, encoding="utf-8", xml_declaration=True)
 st.download_button("Baixar Traducao", xml_output, file_name=f"localizado_{display_name}")
+
+zip_path = st.session_state.get("batch_zip_path")
+if zip_path:
+    zip_file = Path(zip_path)
+    if zip_file.exists():
+        st.caption(f"Pacote final: `{zip_file}`")
+        with zip_file.open("rb") as f:
+            st.download_button(
+                "Baixar pacote ZIP do lote",
+                data=f.read(),
+                file_name=zip_file.name,
+                mime="application/zip",
+            )

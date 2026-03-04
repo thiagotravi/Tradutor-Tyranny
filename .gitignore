@@ -16,3 +16,4 @@ data/progress_data.json
 
 # Arquivos de tradução (opcional, se quiser versionar apenas o código)
 localizado_*.stringtable
+build/

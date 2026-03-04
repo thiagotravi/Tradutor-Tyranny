@@ -62,7 +62,9 @@ Ou execute:
 4. Opcional: use **Iniciar lote (arquivos filtrados)** para processar varios arquivos em sequencia.
 5. Revise entradas pausadas (termos faltantes ou baixa confianca).
 6. Clique em aprovar para continuar.
-7. Baixe o arquivo traduzido ao final de cada arquivo.
+7. Cada arquivo finalizado e salvo automaticamente no **diretorio de saida espelho**.
+8. Ao fim do lote, a ferramenta gera um `traducao_ptbr.zip` para distribuicao/aplicacao.
+9. Baixe o arquivo traduzido individual ou o ZIP do lote.
 
 ## Scripts auxiliares
 
