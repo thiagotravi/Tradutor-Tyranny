@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+# Streamlit e IDEs
+.streamlit/
+.vscode/
+
+# Dados e Chaves (Não suba sua API KEY!)
+progress_data.json
+.env
+
+# Arquivos de tradução (opcional, se quiser versionar apenas o código)
+localizado_*.stringtable
