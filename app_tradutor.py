@@ -7,7 +7,9 @@ import streamlit as st
 from app_core.context_rules import obter_contexto_voz
 from app_core.filesystem import (
     descobrir_arquivos_stringtable,
+    localizar_arquivo_equivalente_por_idioma,
     relpath_display,
+    resolver_source_language_root,
 )
 from app_core.glossary import verificar_termos_faltantes
 from app_core.output_packaging import gerar_zip_da_saida, salvar_xml_traduzido
@@ -18,6 +20,7 @@ from app_core.translator import (
     normalizar_traducao_feminina,
     processar_entrada,
 )
+from app_core.validation import validar_traducao_com_es
 from translation_progress import ProgressManager
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,28 @@ def load_tree_from_target(source_mode: str, selected_path: str, uploaded_file, s
     return tree, root, display_name, progress_key
 
 
+def carregar_entradas_es_para_arquivo(selected_path: str):
+    source_es_root = st.session_state.get("source_es_root")
+    source_en_root = st.session_state.get("source_en_root")
+    if not source_es_root or not source_en_root:
+        return None
+
+    es_file = localizar_arquivo_equivalente_por_idioma(
+        source_file=selected_path,
+        source_root_origem=source_en_root,
+        source_root_destino=source_es_root,
+    )
+    if not es_file:
+        return None
+
+    try:
+        es_tree = ET.parse(es_file)
+        es_root = es_tree.getroot()
+        return es_root.findall(".//Entry")
+    except Exception:
+        return None
+
+
 def render_directory_selector():
     st.subheader("Fonte de Arquivos")
     root_path = st.text_input(
@@ -77,6 +102,16 @@ def render_directory_selector():
             st.session_state.selected_file_path = st.session_state.discovered_files[0] if arquivos else None
             if not st.session_state.get("output_root"):
                 st.session_state.output_root = str(Path.cwd() / "build" / "pt-BR")
+            es_root_input = st.session_state.get("source_es_input", "").strip()
+            if es_root_input:
+                try:
+                    resolved_es_root = resolver_source_language_root(es_root_input, "es")
+                    st.session_state.source_es_root = str(resolved_es_root)
+                except ValueError as exc:
+                    st.warning(f"Validacao ES desativada: {exc}")
+                    st.session_state.source_es_root = None
+            else:
+                st.session_state.source_es_root = None
         except ValueError as exc:
             st.error(str(exc))
             st.session_state.discovered_files = []
@@ -90,6 +125,17 @@ def render_directory_selector():
 
     st.caption(f"Source EN detectado: `{source_en_root}`")
     st.caption(f"Arquivos encontrados em EN: {len(arquivos)}")
+    source_es_input = st.text_input(
+        "Diretorio raiz ES para validacao (opcional)",
+        value=st.session_state.get("source_es_input", ""),
+        key="source_es_input",
+        help="Aceita localized, localized/es ou localized/es/text.",
+    )
+    if st.session_state.get("source_es_root"):
+        st.caption(f"Source ES detectado: `{st.session_state.get('source_es_root')}`")
+    elif source_es_input.strip():
+        st.caption("Source ES sera validado ao clicar em carregar arquivos.")
+
     output_root = st.text_input(
         "Diretorio de saida espelho",
         value=st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
@@ -186,6 +232,8 @@ if "batch_cursor" not in st.session_state:
     st.session_state.batch_cursor = 0
 if "batch_zip_path" not in st.session_state:
     st.session_state.batch_zip_path = ""
+if "es_entries" not in st.session_state:
+    st.session_state.es_entries = None
 
 render_sidebar_progress()
 client, model_name = init_translation_client()
@@ -223,6 +271,10 @@ if st.session_state.get("last_target") != target_id or "tree" not in st.session_
     st.session_state.tree = tree
     st.session_state.root = root
     st.session_state.entries = root.findall(".//Entry")
+    if source_mode == "Diretorio":
+        st.session_state.es_entries = carregar_entradas_es_para_arquivo(selected_path)
+    else:
+        st.session_state.es_entries = None
     st.session_state.progress_key = progress_key
     reset_translation_state(target_id)
 else:
@@ -236,6 +288,11 @@ while st.session_state.idx < len(st.session_state.entries):
     entry = st.session_state.entries[idx]
     txt_node = entry.find("DefaultText")
     txt_en = txt_node.text if txt_node is not None and txt_node.text else ""
+    txt_es = ""
+    es_entries = st.session_state.get("es_entries")
+    if es_entries and idx < len(es_entries):
+        es_txt_node = es_entries[idx].find("DefaultText")
+        txt_es = es_txt_node.text if es_txt_node is not None and es_txt_node.text else ""
     faltantes = verificar_termos_faltantes(txt_en)
     instrucoes_dinamicas = obter_contexto_voz(display_name)
 
@@ -264,7 +321,14 @@ while st.session_state.idx < len(st.session_state.entries):
                 st.stop()
 
     res = st.session_state.cache[idx]
-    if res.get("confianca", 0) >= 10 and not faltantes:
+    validacao = validar_traducao_com_es(
+        texto_en=txt_en,
+        texto_es=txt_es,
+        texto_pt=res.get("traducao_padrao", ""),
+    )
+    tem_inconsistencia = validacao["status"] in {"review", "block"}
+
+    if res.get("confianca", 0) >= 10 and not faltantes and not tem_inconsistencia:
         if txt_node is not None:
             txt_node.text = res.get("traducao_padrao", "")
         f_node = entry.find("FemaleText")
@@ -279,18 +343,24 @@ while st.session_state.idx < len(st.session_state.entries):
         st.warning(f"INTERVENCAO NECESSARIA (Entrada {idx})")
         if faltantes:
             st.error(f"Termos nao mapeados no glossario: {', '.join(faltantes)}")
+        if validacao["issues"]:
+            st.warning("Inconsistencias detectadas na validacao EN/ES/PT:")
+            for issue in validacao["issues"]:
+                st.write(f"- [{issue['severity']}] {issue['message']}")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.text_area("Original (EN):", value=txt_en, height=350, disabled=True)
         with col2:
+            st.text_area("Referencia (ES):", value=txt_es, height=350, disabled=True)
+        with col3:
             edit_p = st.text_area(
                 "Padrao:",
                 value=res.get("traducao_padrao", ""),
                 height=350,
                 key=f"p_{idx}",
             )
-        with col3:
+        with col4:
             sugestao_fem = normalizar_traducao_feminina(
                 res.get("traducao_padrao", ""),
                 res.get("traducao_feminina", ""),
