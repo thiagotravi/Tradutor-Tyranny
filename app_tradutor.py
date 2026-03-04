@@ -14,6 +14,7 @@ from app_core.settings import criar_client, obter_api_key, obter_model_name
 from app_core.translator import (
     TranslationAPIError,
     TranslationResponseError,
+    normalizar_traducao_feminina,
     processar_entrada,
 )
 from translation_progress import ProgressManager
@@ -217,8 +218,12 @@ while st.session_state.idx < len(st.session_state.entries):
         if txt_node is not None:
             txt_node.text = res.get("traducao_padrao", "")
         f_node = entry.find("FemaleText")
-        if f_node is not None and res.get("traducao_feminina"):
-            f_node.text = res.get("traducao_feminina")
+        if f_node is not None:
+            fem_final = normalizar_traducao_feminina(
+                res.get("traducao_padrao", ""),
+                res.get("traducao_feminina", ""),
+            )
+            f_node.text = fem_final if fem_final else None
         st.session_state.idx += 1
     else:
         st.warning(f"INTERVENCAO NECESSARIA (Entrada {idx})")
@@ -236,9 +241,13 @@ while st.session_state.idx < len(st.session_state.entries):
                 key=f"p_{idx}",
             )
         with col3:
+            sugestao_fem = normalizar_traducao_feminina(
+                res.get("traducao_padrao", ""),
+                res.get("traducao_feminina", ""),
+            )
             edit_f = st.text_area(
                 "Feminino:",
-                value=res.get("traducao_feminina", ""),
+                value=sugestao_fem,
                 height=350,
                 key=f"f_{idx}",
             )
@@ -248,7 +257,8 @@ while st.session_state.idx < len(st.session_state.entries):
                 txt_node.text = edit_p
             f_node = entry.find("FemaleText")
             if f_node is not None:
-                f_node.text = edit_f
+                fem_final = normalizar_traducao_feminina(edit_p, edit_f)
+                f_node.text = fem_final if fem_final else None
             st.session_state.idx += 1
             st.rerun()
         break

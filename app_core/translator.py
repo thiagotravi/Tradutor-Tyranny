@@ -14,6 +14,16 @@ class TranslationResponseError(TranslationError):
     """Resposta invalida do modelo."""
 
 
+def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -> str:
+    padrao = (traducao_padrao or "").strip()
+    feminina = (traducao_feminina or "").strip()
+    if not feminina:
+        return ""
+    if feminina == padrao or feminina.casefold() == padrao.casefold():
+        return ""
+    return traducao_feminina
+
+
 def extrair_json_resposta(resposta_texto: str) -> str:
     txt = (resposta_texto or "").strip()
     if not txt:
@@ -32,6 +42,7 @@ def normalizar_resposta(data):
 
     traducao_padrao = str(data.get("traducao_padrao", ""))
     traducao_feminina = str(data.get("traducao_feminina", ""))
+    traducao_feminina = normalizar_traducao_feminina(traducao_padrao, traducao_feminina)
     try:
         confianca = int(data.get("confianca", 0))
     except (TypeError, ValueError):
@@ -65,6 +76,7 @@ REGRAS DE OURO:
 1. Mantenha EXATAMENTE as quebras de linha (\\n) originais.
 2. Preserve todas as tags [url=glossary:...].
 3. Use o glossário para termos dentro das tags.
+4. Preencha "traducao_feminina" APENAS quando houver variacao real de genero (artigos, pronomes, adjetivos ou flexao). Se nao houver necessidade, retorne string vazia.
 
 RETORNE APENAS JSON:
 {{
