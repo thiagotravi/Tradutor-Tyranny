@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 env/
+.env
 
 # Streamlit e IDEs
 .streamlit/

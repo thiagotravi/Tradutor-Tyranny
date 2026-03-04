@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
@@ -11,8 +13,13 @@ from wiki_personagens import REGRAS_COMPANHEIROS
 from wiki_faccoes import REGRAS_FACCOES
 from translation_progress import ProgressManager
 
+load_dotenv()
+
 # --- CONFIGURAÇÃO DA API ---
-API_KEY = "AIzaSyD5smhfI_DAeyK4lw3Gy_Bd05xoEa25nis"
+API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+if not API_KEY:
+    st.error("Erro: API_KEY não encontrada. Verifique seu arquivo .env")
+    st.stop()
 genai.configure(api_key=API_KEY.strip())
 MODEL_NAME = 'models/gemini-flash-latest'
 model = genai.GenerativeModel(MODEL_NAME)
