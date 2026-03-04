@@ -103,6 +103,38 @@ def render_directory_selector():
     selected_label = st.selectbox("Arquivo para traduzir", labels, key="selected_relpath")
     selected_map = dict(opcoes)
     selected_file_path = selected_map[selected_label]
+
+    col_start, col_stop = st.columns(2)
+    with col_start:
+        if st.button("Iniciar lote (arquivos filtrados)"):
+            st.session_state.batch_queue = [full for _, full in opcoes]
+            st.session_state.batch_cursor = 0
+            st.session_state.batch_active = len(st.session_state.batch_queue) > 0
+            st.rerun()
+    with col_stop:
+        if st.button("Parar lote"):
+            st.session_state.batch_active = False
+            st.session_state.batch_queue = []
+            st.session_state.batch_cursor = 0
+            st.rerun()
+
+    if st.session_state.get("batch_active"):
+        queue = st.session_state.get("batch_queue", [])
+        cursor = st.session_state.get("batch_cursor", 0)
+        if not queue or cursor >= len(queue):
+            st.session_state.batch_active = False
+            st.session_state.batch_queue = []
+            st.session_state.batch_cursor = 0
+            st.success("Lote concluido.")
+            st.session_state.selected_file_path = selected_file_path
+            return selected_file_path
+
+        current_file = queue[cursor]
+        current_rel = relpath_display(Path(current_file), source_en_root)
+        st.info(f"Lote ativo: {cursor + 1}/{len(queue)} - {current_rel}")
+        st.session_state.selected_file_path = current_file
+        return current_file
+
     st.session_state.selected_file_path = selected_file_path
     return selected_file_path
 
@@ -136,6 +168,12 @@ if "progresso" not in st.session_state:
     st.session_state.progresso = ProgressManager()
 if "cache" not in st.session_state:
     st.session_state.cache = {}
+if "batch_active" not in st.session_state:
+    st.session_state.batch_active = False
+if "batch_queue" not in st.session_state:
+    st.session_state.batch_queue = []
+if "batch_cursor" not in st.session_state:
+    st.session_state.batch_cursor = 0
 
 render_sidebar_progress()
 client, model_name = init_translation_client()
@@ -265,6 +303,25 @@ while st.session_state.idx < len(st.session_state.entries):
 else:
     st.success("Arquivo finalizado!")
     st.session_state.progresso.update_status(st.session_state.progress_key, True)
+    if source_mode == "Diretorio" and st.session_state.get("batch_active"):
+        queue = st.session_state.get("batch_queue", [])
+        cursor = st.session_state.get("batch_cursor", 0)
+        if cursor < len(queue):
+            current_from_queue = queue[cursor]
+            if current_from_queue == selected_path:
+                cursor += 1
+            elif selected_path in queue:
+                cursor = queue.index(selected_path) + 1
+
+        st.session_state.batch_cursor = cursor
+        if cursor < len(queue):
+            st.session_state.selected_file_path = queue[cursor]
+            st.rerun()
+        else:
+            st.session_state.batch_active = False
+            st.session_state.batch_queue = []
+            st.session_state.batch_cursor = 0
+            st.success("Lote finalizado com sucesso.")
 
 xml_output = ET.tostring(st.session_state.root, encoding="utf-8", xml_declaration=True)
 st.download_button("Baixar Traducao", xml_output, file_name=f"localizado_{display_name}")

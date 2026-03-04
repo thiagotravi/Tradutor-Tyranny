@@ -59,9 +59,10 @@ Ou execute:
    - **Diretorio** (novo): informe `localized`, `localized/en` ou `localized/en/text`. A ferramenta detecta e usa apenas a arvore de `en`.
    - **Arquivo unico (legado)**: envie um `.stringtable`/`.xml` manualmente.
 3. Selecione o arquivo a traduzir (no modo diretorio).
-4. Revise entradas pausadas (termos faltantes ou baixa confianca).
-5. Clique em aprovar para continuar.
-6. Baixe o arquivo traduzido ao final.
+4. Opcional: use **Iniciar lote (arquivos filtrados)** para processar varios arquivos em sequencia.
+5. Revise entradas pausadas (termos faltantes ou baixa confianca).
+6. Clique em aprovar para continuar.
+7. Baixe o arquivo traduzido ao final de cada arquivo.
 
 ## Scripts auxiliares
 
