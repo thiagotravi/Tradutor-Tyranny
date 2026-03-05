@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from config_traducao import GUIA_ESTILO
 from app_core.glossary import obter_glossario_completo
 
@@ -20,6 +21,8 @@ GLOSSARY_WRAPPED_TAG_PATTERN = re.compile(
     r"\[url=glossary:([^\]]+)\](.*?)\[/url\]",
     flags=re.IGNORECASE | re.DOTALL,
 )
+DEFAULT_API_RETRY_ATTEMPTS = 4
+DEFAULT_API_RETRY_BASE_DELAY_S = 1.2
 
 
 def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -> str:
@@ -82,10 +85,23 @@ def texto_parece_truncado(texto_en: str, texto_pt: str) -> bool:
 
 
 def _gerar_e_parsear_json(client, model_name: str, prompt: str):
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-    )
+    last_exc = None
+    for attempt in range(1, DEFAULT_API_RETRY_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= DEFAULT_API_RETRY_ATTEMPTS:
+                raise TranslationAPIError(
+                    f"Falha ao comunicar com o Gemini apos {DEFAULT_API_RETRY_ATTEMPTS} tentativas."
+                ) from exc
+            delay_s = DEFAULT_API_RETRY_BASE_DELAY_S * (2 ** (attempt - 1))
+            time.sleep(delay_s)
+
     txt_json = extrair_json_resposta(getattr(response, "text", ""))
     return json.loads(txt_json)
 
@@ -194,6 +210,8 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
     prompt = montar_prompt(texto_en, instrucoes_voz, glossario_final)
     try:
         data = _gerar_e_parsear_json(client, model_name, prompt)
+    except TranslationAPIError:
+        raise
     except Exception as exc:
         raise TranslationAPIError("Falha ao comunicar com o Gemini.") from exc
 
