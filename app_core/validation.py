@@ -93,6 +93,15 @@ def validar_traducao_com_es(texto_en: str, texto_es: str, texto_pt: str):
             }
         )
 
+    if en.count('"') != pt.count('"'):
+        issues.append(
+            {
+                "code": "quote_mismatch",
+                "severity": "block",
+                "message": 'Quantidade de aspas duplas (") difere entre EN e PT.',
+            }
+        )
+
     if es.strip():
         # Sinaliza possivel traducao indevida de nomes proprios:
         # token capitalizado presente em EN e ES, ausente em PT.

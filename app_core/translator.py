@@ -64,6 +64,53 @@ def sanitizar_tags_glossario(texto_en: str, texto_pt: str) -> str:
     return GLOSSARY_WRAPPED_TAG_PATTERN.sub(_replace, texto_pt)
 
 
+def preservar_aspas_com_base_no_en(texto_en: str, texto_pt: str) -> str:
+    """
+    Preserva aspas duplas com base no EN.
+    Reforca aspas por linha (inicio/fim) e corrige deficits globais.
+    """
+    en = texto_en or ""
+    pt = texto_pt or ""
+    if not en or not pt:
+        return pt
+
+    en_lines = en.split("\n")
+    pt_lines = pt.split("\n")
+    limit = min(len(en_lines), len(pt_lines))
+
+    for i in range(limit):
+        en_line = en_lines[i]
+        pt_line = pt_lines[i]
+        core = pt_line.strip()
+        if not core:
+            continue
+
+        leading = pt_line[: len(pt_line) - len(pt_line.lstrip())]
+        trailing = pt_line[len(pt_line.rstrip()) :]
+        en_core = en_line.strip()
+
+        if en_core.startswith('"') and not core.startswith('"'):
+            core = '"' + core
+        if en_core.endswith('"') and not core.endswith('"'):
+            core = core + '"'
+
+        pt_lines[i] = f"{leading}{core}{trailing}"
+
+    fixed = "\n".join(pt_lines)
+
+    en_quotes = en.count('"')
+    pt_quotes = fixed.count('"')
+    if en_quotes > 0 and pt_quotes < en_quotes:
+        deficit = en_quotes - pt_quotes
+        while deficit >= 2 and fixed:
+            fixed = f'"{fixed}"'
+            deficit -= 2
+        if deficit == 1:
+            fixed = fixed + '"'
+
+    return fixed
+
+
 def texto_parece_truncado(texto_en: str, texto_pt: str) -> bool:
     en = texto_en or ""
     pt = texto_pt or ""
@@ -189,6 +236,7 @@ REGRAS DE OURO:
 3. Use o glossário para termos dentro das tags.
 4. Preencha "traducao_feminina" APENAS quando houver variacao real de genero (artigos, pronomes, adjetivos ou flexao). Se nao houver necessidade, retorne string vazia.
 5. NUNCA adicione tags [url=glossary:...] extras. O total e a ordem de tags devem ser identicos ao EN.
+6. Preserve aspas duplas (\") onde existirem no EN. Nao remova aspas de falas.
 
 RETORNE APENAS JSON:
 {{
@@ -218,7 +266,9 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
     def _normalizar_final(data_obj):
         res = normalizar_resposta(data_obj)
         res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
+        res["traducao_padrao"] = preservar_aspas_com_base_no_en(texto_en, res.get("traducao_padrao", ""))
         res["traducao_feminina"] = sanitizar_tags_glossario(texto_en, res.get("traducao_feminina", ""))
+        res["traducao_feminina"] = preservar_aspas_com_base_no_en(texto_en, res.get("traducao_feminina", ""))
         res["traducao_feminina"] = normalizar_traducao_feminina(
             res.get("traducao_padrao", ""),
             res.get("traducao_feminina", ""),
