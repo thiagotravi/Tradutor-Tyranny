@@ -1,4 +1,5 @@
 import json
+import re
 from config_traducao import GUIA_ESTILO
 from app_core.glossary import obter_glossario_completo
 
@@ -15,6 +16,12 @@ class TranslationResponseError(TranslationError):
     """Resposta invalida do modelo."""
 
 
+GLOSSARY_WRAPPED_TAG_PATTERN = re.compile(
+    r"\[url=glossary:([^\]]+)\](.*?)\[/url\]",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
 def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -> str:
     padrao = (traducao_padrao or "").strip()
     feminina = (traducao_feminina or "").strip()
@@ -23,6 +30,24 @@ def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -
     if feminina == padrao or feminina.casefold() == padrao.casefold():
         return ""
     return traducao_feminina
+
+
+def sanitizar_tags_glossario(texto_en: str, texto_pt: str) -> str:
+    """
+    Remove tags de glossario criadas indevidamente no PT.
+    Mantem apenas tags cujo identificador existe no texto EN.
+    """
+    allowed = set(re.findall(r"\[url=glossary:([^\]]+)\]", texto_en or "", flags=re.IGNORECASE))
+    allowed_low = {t.lower() for t in allowed}
+
+    def _replace(match):
+        term = (match.group(1) or "").strip()
+        inner = match.group(2) or ""
+        if term.lower() in allowed_low:
+            return match.group(0)
+        return inner
+
+    return GLOSSARY_WRAPPED_TAG_PATTERN.sub(_replace, texto_pt or "")
 
 
 def extrair_json_resposta(resposta_texto: str) -> str:
@@ -107,7 +132,14 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
     try:
         txt_json = extrair_json_resposta(getattr(response, "text", ""))
         data = json.loads(txt_json)
-        return normalizar_resposta(data)
+        res = normalizar_resposta(data)
+        res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = sanitizar_tags_glossario(texto_en, res.get("traducao_feminina", ""))
+        res["traducao_feminina"] = normalizar_traducao_feminina(
+            res.get("traducao_padrao", ""),
+            res.get("traducao_feminina", ""),
+        )
+        return res
     except json.JSONDecodeError as exc:
         raise TranslationResponseError("Gemini retornou JSON invalido.") from exc
 

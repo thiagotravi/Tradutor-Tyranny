@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 VALID_EXTENSIONS = {".stringtable", ".xml"}
+EXCLUDED_FILENAMES = {"language.xml"}
 
 
 def resolver_source_language_root(root_path: str, language: str) -> Path:
@@ -41,7 +42,11 @@ def descobrir_arquivos_stringtable(root_path: str):
 
     arquivos = []
     for path in source_en.rglob("*"):
-        if path.is_file() and path.suffix.lower() in VALID_EXTENSIONS:
+        if (
+            path.is_file()
+            and path.suffix.lower() in VALID_EXTENSIONS
+            and path.name.lower() not in EXCLUDED_FILENAMES
+        ):
             arquivos.append(path)
 
     arquivos.sort(key=lambda p: str(p).lower())
@@ -61,8 +66,20 @@ def localizar_arquivo_equivalente_por_idioma(
     except Exception:
         return None
 
-    candidato = root_destino / rel
-    return candidato if candidato.exists() and candidato.is_file() else None
+    candidates = [root_destino / rel]
+
+    # Fallback 1: se origem usa ".../text" e destino nao, tenta remover prefixo "text".
+    rel_parts_low = [p.lower() for p in rel.parts]
+    if rel_parts_low and rel_parts_low[0] == "text":
+        candidates.append(root_destino / Path(*rel.parts[1:]))
+    else:
+        # Fallback 2: se destino usar ".../text", tenta adicionar "text" no inicio.
+        candidates.append(root_destino / "text" / rel)
+
+    for candidato in candidates:
+        if candidato.exists() and candidato.is_file():
+            return candidato
+    return None
 
 
 def relpath_display(path_obj: Path, root_path: str) -> str:

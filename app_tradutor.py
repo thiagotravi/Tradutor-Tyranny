@@ -75,7 +75,7 @@ def carregar_entradas_es_para_arquivo(selected_path: str):
     source_es_root = st.session_state.get("source_es_root")
     source_en_root = st.session_state.get("source_en_root")
     if not source_es_root or not source_en_root:
-        return None
+        return None, None
 
     es_file = localizar_arquivo_equivalente_por_idioma(
         source_file=selected_path,
@@ -83,14 +83,14 @@ def carregar_entradas_es_para_arquivo(selected_path: str):
         source_root_destino=source_es_root,
     )
     if not es_file:
-        return None
+        return None, None
 
     try:
         es_tree = ET.parse(es_file)
         es_root = es_tree.getroot()
-        return es_root.findall(".//Entry")
+        return es_root.findall(".//Entry"), str(es_file)
     except Exception:
-        return None
+        return None, None
 
 
 def reset_glossary_step():
@@ -208,16 +208,6 @@ def render_directory_selector():
             reset_glossary_step()
             if not st.session_state.get("output_root"):
                 st.session_state.output_root = str(Path.cwd() / "build" / "pt-BR")
-            es_root_input = st.session_state.get("source_es_input", "").strip()
-            if es_root_input:
-                try:
-                    resolved_es_root = resolver_source_language_root(es_root_input, "es")
-                    st.session_state.source_es_root = str(resolved_es_root)
-                except ValueError as exc:
-                    st.warning(f"Validacao ES desativada: {exc}")
-                    st.session_state.source_es_root = None
-            else:
-                st.session_state.source_es_root = None
         except ValueError as exc:
             st.error(str(exc))
             st.session_state.discovered_files = []
@@ -237,10 +227,19 @@ def render_directory_selector():
         key="source_es_input",
         help="Aceita localized, localized/es ou localized/es/text.",
     )
+    if source_es_input.strip():
+        try:
+            resolved_es_root = resolver_source_language_root(source_es_input.strip(), "es")
+            st.session_state.source_es_root = str(resolved_es_root)
+        except ValueError:
+            st.session_state.source_es_root = None
+    else:
+        st.session_state.source_es_root = None
+
     if st.session_state.get("source_es_root"):
         st.caption(f"Source ES detectado: `{st.session_state.get('source_es_root')}`")
     elif source_es_input.strip():
-        st.caption("Source ES sera validado ao clicar em carregar arquivos.")
+        st.warning("Source ES invalido para validacao.")
 
     output_root = st.text_input(
         "Diretorio de saida espelho",
@@ -340,6 +339,8 @@ if "batch_zip_path" not in st.session_state:
     st.session_state.batch_zip_path = ""
 if "es_entries" not in st.session_state:
     st.session_state.es_entries = None
+if "es_file_path" not in st.session_state:
+    st.session_state.es_file_path = None
 if "glossary_scan_done" not in st.session_state:
     st.session_state.glossary_scan_done = False
 if "glossary_ready" not in st.session_state:
@@ -394,9 +395,12 @@ if st.session_state.get("last_target") != target_id or "tree" not in st.session_
     st.session_state.root = root
     st.session_state.entries = root.findall(".//Entry")
     if source_mode == "Diretorio":
-        st.session_state.es_entries = carregar_entradas_es_para_arquivo(selected_path)
+        es_entries, es_file_path = carregar_entradas_es_para_arquivo(selected_path)
+        st.session_state.es_entries = es_entries
+        st.session_state.es_file_path = es_file_path
     else:
         st.session_state.es_entries = None
+        st.session_state.es_file_path = None
     st.session_state.progress_key = progress_key
     reset_translation_state(target_id)
 else:
@@ -404,6 +408,13 @@ else:
         display_name = Path(selected_path).name
     else:
         display_name = uploaded_file.name
+
+if source_mode == "Diretorio" and st.session_state.get("source_es_root"):
+    if st.session_state.get("es_file_path"):
+        es_rel = relpath_display(Path(st.session_state.get("es_file_path")), st.session_state.get("source_es_root"))
+        st.caption(f"Referencia ES mapeada: `{es_rel}`")
+    else:
+        st.warning("Referencia ES nao encontrada para o arquivo selecionado.")
 
 while st.session_state.idx < len(st.session_state.entries):
     idx = st.session_state.idx
@@ -470,6 +481,8 @@ while st.session_state.idx < len(st.session_state.entries):
             st.warning("Inconsistencias detectadas na validacao EN/ES/PT:")
             for issue in validacao["issues"]:
                 st.write(f"- [{issue['severity']}] {issue['message']}")
+        if st.session_state.get("source_es_root") and not st.session_state.get("es_file_path"):
+            st.info("Arquivo de referencia ES correspondente nao foi encontrado para este arquivo EN.")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
