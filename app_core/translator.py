@@ -21,6 +21,7 @@ GLOSSARY_WRAPPED_TAG_PATTERN = re.compile(
     r"\[url=glossary:([^\]]+)\](.*?)\[/url\]",
     flags=re.IGNORECASE | re.DOTALL,
 )
+SMART_DOUBLE_QUOTES_PATTERN = re.compile(r"[“”„‟«»]")
 DEFAULT_API_RETRY_ATTEMPTS = 4
 DEFAULT_API_RETRY_BASE_DELAY_S = 1.2
 
@@ -33,6 +34,14 @@ def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -
     if feminina == padrao or feminina.casefold() == padrao.casefold():
         return ""
     return traducao_feminina
+
+
+def normalizar_aspas_para_ascii(texto: str) -> str:
+    txt = texto or ""
+    txt = SMART_DOUBLE_QUOTES_PATTERN.sub('"', txt)
+    # Remove sequencias duplicadas de aspas duplas adjacentes.
+    txt = re.sub(r'"{2,}', '"', txt)
+    return txt
 
 
 def sanitizar_tags_glossario(texto_en: str, texto_pt: str) -> str:
@@ -69,8 +78,8 @@ def preservar_aspas_com_base_no_en(texto_en: str, texto_pt: str) -> str:
     Preserva aspas duplas com base no EN.
     Reforca aspas por linha (inicio/fim) e corrige deficits globais.
     """
-    en = texto_en or ""
-    pt = texto_pt or ""
+    en = normalizar_aspas_para_ascii(texto_en or "")
+    pt = normalizar_aspas_para_ascii(texto_pt or "")
     if not en or not pt:
         return pt
 
@@ -114,7 +123,7 @@ def preservar_aspas_com_base_no_en(texto_en: str, texto_pt: str) -> str:
         if chars[i] == '"':
             chars.pop(i)
             excess -= 1
-    return "".join(chars)
+    return normalizar_aspas_para_ascii("".join(chars))
 
 
 def texto_parece_truncado(texto_en: str, texto_pt: str) -> bool:
@@ -243,6 +252,7 @@ REGRAS DE OURO:
 4. Preencha "traducao_feminina" APENAS quando houver variacao real de genero (artigos, pronomes, adjetivos ou flexao). Se nao houver necessidade, retorne string vazia.
 5. NUNCA adicione tags [url=glossary:...] extras. O total e a ordem de tags devem ser identicos ao EN.
 6. Preserve aspas duplas (\") onde existirem no EN. Nao remova aspas de falas.
+7. Use apenas aspas duplas ASCII (\") e nunca use aspas tipograficas (ex.: “ ”).
 
 RETORNE APENAS JSON:
 {{
@@ -271,6 +281,8 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
 
     def _normalizar_final(data_obj):
         res = normalizar_resposta(data_obj)
+        res["traducao_padrao"] = normalizar_aspas_para_ascii(res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = normalizar_aspas_para_ascii(res.get("traducao_feminina", ""))
         res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
         res["traducao_padrao"] = preservar_aspas_com_base_no_en(texto_en, res.get("traducao_padrao", ""))
         res["traducao_feminina"] = sanitizar_tags_glossario(texto_en, res.get("traducao_feminina", ""))

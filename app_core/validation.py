@@ -102,6 +102,15 @@ def validar_traducao_com_es(texto_en: str, texto_es: str, texto_pt: str):
             }
         )
 
+    if re.search(r"[“”„‟«»]", pt):
+        issues.append(
+            {
+                "code": "non_ascii_quotes",
+                "severity": "block",
+                "message": 'Aspas tipograficas detectadas no PT. Use apenas aspas duplas ASCII (").',
+            }
+        )
+
     if es.strip():
         # Sinaliza possivel traducao indevida de nomes proprios:
         # token capitalizado presente em EN e ES, ausente em PT.
