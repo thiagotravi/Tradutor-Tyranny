@@ -100,15 +100,21 @@ def preservar_aspas_com_base_no_en(texto_en: str, texto_pt: str) -> str:
 
     en_quotes = en.count('"')
     pt_quotes = fixed.count('"')
-    if en_quotes > 0 and pt_quotes < en_quotes:
-        deficit = en_quotes - pt_quotes
-        while deficit >= 2 and fixed:
-            fixed = f'"{fixed}"'
-            deficit -= 2
-        if deficit == 1:
-            fixed = fixed + '"'
+    if pt_quotes <= en_quotes:
+        # Nao injeta aspas globalmente para evitar artefatos.
+        # Se faltar aspas, a validacao quote_mismatch bloqueia para revisao manual.
+        return fixed
 
-    return fixed
+    # Remove apenas aspas excedentes (normalmente sobram no final).
+    excess = pt_quotes - en_quotes
+    chars = list(fixed)
+    for i in range(len(chars) - 1, -1, -1):
+        if excess == 0:
+            break
+        if chars[i] == '"':
+            chars.pop(i)
+            excess -= 1
+    return "".join(chars)
 
 
 def texto_parece_truncado(texto_en: str, texto_pt: str) -> bool:
