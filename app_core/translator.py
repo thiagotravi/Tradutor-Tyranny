@@ -34,20 +34,60 @@ def normalizar_traducao_feminina(traducao_padrao: str, traducao_feminina: str) -
 
 def sanitizar_tags_glossario(texto_en: str, texto_pt: str) -> str:
     """
-    Remove tags de glossario criadas indevidamente no PT.
-    Mantem apenas tags cujo identificador existe no texto EN.
+    Forca a estrutura de tags de glossario do PT a seguir o EN:
+    - mesma ordem de aparicao
+    - sem tags extras
+    - IDs alinhados ao EN
     """
-    allowed = set(re.findall(r"\[url=glossary:([^\]]+)\]", texto_en or "", flags=re.IGNORECASE))
-    allowed_low = {t.lower() for t in allowed}
+    en_ids = [m.strip() for m in re.findall(r"\[url=glossary:([^\]]+)\]", texto_en or "", flags=re.IGNORECASE)]
+    if not texto_pt:
+        return ""
+    if not en_ids:
+        # Se EN nao tem tags, remove qualquer tag de glossario inserida no PT.
+        return GLOSSARY_WRAPPED_TAG_PATTERN.sub(lambda m: m.group(2) or "", texto_pt)
+
+    idx = 0
 
     def _replace(match):
-        term = (match.group(1) or "").strip()
+        nonlocal idx
         inner = match.group(2) or ""
-        if term.lower() in allowed_low:
-            return match.group(0)
+        if idx < len(en_ids):
+            term_id = en_ids[idx]
+            idx += 1
+            return f"[url=glossary:{term_id}]{inner}[/url]"
+        # Remove tags excedentes que nao existem no EN.
         return inner
 
-    return GLOSSARY_WRAPPED_TAG_PATTERN.sub(_replace, texto_pt or "")
+    return GLOSSARY_WRAPPED_TAG_PATTERN.sub(_replace, texto_pt)
+
+
+def texto_parece_truncado(texto_en: str, texto_pt: str) -> bool:
+    en = texto_en or ""
+    pt = texto_pt or ""
+    en_compact = re.sub(r"\s+", " ", en).strip()
+    pt_compact = re.sub(r"\s+", " ", pt).strip()
+
+    if not en_compact:
+        return False
+
+    ratio = len(pt_compact) / max(1, len(en_compact))
+    en_line_count = en.count("\n")
+    pt_line_count = pt.count("\n")
+
+    if en_line_count >= 2 and pt_line_count < en_line_count:
+        return True
+    if len(en_compact) >= 120 and ratio < 0.55:
+        return True
+    return False
+
+
+def _gerar_e_parsear_json(client, model_name: str, prompt: str):
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+    txt_json = extrair_json_resposta(getattr(response, "text", ""))
+    return json.loads(txt_json)
 
 
 def extrair_json_resposta(resposta_texto: str) -> str:
@@ -62,9 +102,38 @@ def extrair_json_resposta(resposta_texto: str) -> str:
     return txt
 
 
+def _coerce_to_response_object(data):
+    if isinstance(data, dict):
+        # Caso comum
+        return data
+
+    if isinstance(data, str):
+        # Algumas respostas vêm como JSON serializado dentro de string.
+        try:
+            parsed = json.loads(data)
+            return _coerce_to_response_object(parsed)
+        except Exception:
+            raise TranslationResponseError("Resposta JSON veio como texto nao-estruturado.")
+
+    if isinstance(data, list):
+        # Alguns modelos retornam lista; tenta encontrar primeiro objeto util.
+        for item in data:
+            if isinstance(item, dict):
+                return item
+            if isinstance(item, str):
+                try:
+                    parsed = json.loads(item)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    continue
+        raise TranslationResponseError("Resposta JSON em lista sem objeto valido.")
+
+    raise TranslationResponseError("Resposta JSON nao e um objeto.")
+
+
 def normalizar_resposta(data):
-    if not isinstance(data, dict):
-        raise TranslationResponseError("Resposta JSON nao e um objeto.")
+    data = _coerce_to_response_object(data)
 
     traducao_padrao = str(data.get("traducao_padrao", ""))
     traducao_feminina = str(data.get("traducao_feminina", ""))
@@ -103,6 +172,7 @@ REGRAS DE OURO:
 2. Preserve todas as tags [url=glossary:...].
 3. Use o glossário para termos dentro das tags.
 4. Preencha "traducao_feminina" APENAS quando houver variacao real de genero (artigos, pronomes, adjetivos ou flexao). Se nao houver necessidade, retorne string vazia.
+5. NUNCA adicione tags [url=glossary:...] extras. O total e a ordem de tags devem ser identicos ao EN.
 
 RETORNE APENAS JSON:
 {{
@@ -120,19 +190,15 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
     if not texto_en or texto_en.strip() == "":
         return {"traducao_padrao": "", "traducao_feminina": "", "confianca": 10}
 
-    prompt = montar_prompt(texto_en, instrucoes_voz, glossario or obter_glossario_completo())
+    glossario_final = glossario or obter_glossario_completo()
+    prompt = montar_prompt(texto_en, instrucoes_voz, glossario_final)
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
+        data = _gerar_e_parsear_json(client, model_name, prompt)
     except Exception as exc:
         raise TranslationAPIError("Falha ao comunicar com o Gemini.") from exc
 
-    try:
-        txt_json = extrair_json_resposta(getattr(response, "text", ""))
-        data = json.loads(txt_json)
-        res = normalizar_resposta(data)
+    def _normalizar_final(data_obj):
+        res = normalizar_resposta(data_obj)
         res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
         res["traducao_feminina"] = sanitizar_tags_glossario(texto_en, res.get("traducao_feminina", ""))
         res["traducao_feminina"] = normalizar_traducao_feminina(
@@ -140,8 +206,65 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
             res.get("traducao_feminina", ""),
         )
         return res
-    except json.JSONDecodeError as exc:
-        raise TranslationResponseError("Gemini retornou JSON invalido.") from exc
+    try:
+        res = _normalizar_final(data)
+    except TranslationResponseError:
+        # Quando o modelo devolve formato inesperado, tenta uma correcao guiada.
+        repair_prompt = f"""
+Reformate a resposta abaixo para JSON OBJETO valido com as chaves:
+traducao_padrao, traducao_feminina, confianca.
+Nao omita conteudo.
+
+Texto EN:
+{texto_en}
+
+Resposta recebida:
+{json.dumps(data, ensure_ascii=False)}
+
+Retorne APENAS JSON:
+{{
+  "traducao_padrao": "...",
+  "traducao_feminina": "...",
+  "confianca": 10
+}}
+"""
+        try:
+            repaired_data = _gerar_e_parsear_json(client, model_name, repair_prompt)
+            res = _normalizar_final(repaired_data)
+        except Exception as exc:
+            raise TranslationResponseError("Gemini retornou formato de resposta inesperado.") from exc
+
+    # Segunda tentativa automatica quando houver sinais fortes de truncamento.
+    if texto_parece_truncado(texto_en, res.get("traducao_padrao", "")):
+        retry_prompt = f"""
+Corrija a traducao PT-BR abaixo sem omitir nenhum trecho do EN.
+Mantenha EXATAMENTE a mesma quantidade de quebras de linha do EN e preserve tags [url=glossary:...].
+
+GLOSSARIO OBRIGATORIO:
+{json.dumps(glossario_final, ensure_ascii=False, indent=2)}
+
+Texto EN:
+{texto_en}
+
+Traducao PT-BR atual (provavelmente truncada):
+{res.get("traducao_padrao", "")}
+
+Retorne APENAS JSON:
+{{
+  "traducao_padrao": "...",
+  "traducao_feminina": "...",
+  "confianca": 10
+}}
+"""
+        try:
+            retry_data = _gerar_e_parsear_json(client, model_name, retry_prompt)
+            retry_res = _normalizar_final(retry_data)
+            if not texto_parece_truncado(texto_en, retry_res.get("traducao_padrao", "")):
+                return retry_res
+        except Exception:
+            pass
+
+    return res
 
 
 def sugerir_traducao_glossario(client, model_name: str, termo_en: str, termo_es: str = "") -> str:

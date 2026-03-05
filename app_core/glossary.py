@@ -25,6 +25,12 @@ def salvar_glossario_usuario(glossario_usuario: dict):
         json.dump(glossario_usuario, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def resetar_glossario_usuario():
+    USER_GLOSSARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with USER_GLOSSARY_PATH.open("w", encoding="utf-8") as f:
+        json.dump({}, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def obter_glossario_completo():
     return carregar_glossario_usuario()
 

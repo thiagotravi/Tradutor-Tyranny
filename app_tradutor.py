@@ -22,12 +22,14 @@ from app_core.translator import (
     sugerir_traducao_glossario,
 )
 from app_core.validation import validar_traducao_com_es
+from app_core.run_state import load_run_state, save_run_state
 from translation_progress import ProgressManager
 from app_core.glossary import (
     carregar_glossario_usuario,
     coletar_contexto_termos_glossario_em_arquivos,
     coletar_termos_glossario_em_arquivos,
     obter_glossario_completo,
+    resetar_glossario_usuario,
     salvar_glossario_usuario,
 )
 
@@ -101,6 +103,126 @@ def reset_glossary_step():
     st.session_state.glossary_suggestions = {}
     st.session_state.glossary_term_contexts = {}
 
+
+def persist_run_state():
+    state = {
+        "source_root": st.session_state.get("source_root", ""),
+        "source_en_root": st.session_state.get("source_en_root", ""),
+        "source_es_input": st.session_state.get("source_es_input", ""),
+        "source_es_root": st.session_state.get("source_es_root", ""),
+        "output_root": st.session_state.get("output_root", ""),
+        "source_mode": st.session_state.get("source_mode", "Diretorio"),
+        "discovered_files": st.session_state.get("discovered_files", []),
+        "selected_file_path": st.session_state.get("selected_file_path"),
+        "last_target": st.session_state.get("last_target"),
+        "progress_key": st.session_state.get("progress_key"),
+        "idx": st.session_state.get("idx", 0),
+        "batch_active": st.session_state.get("batch_active", False),
+        "batch_queue": st.session_state.get("batch_queue", []),
+        "batch_cursor": st.session_state.get("batch_cursor", 0),
+        "glossary_scan_done": st.session_state.get("glossary_scan_done", False),
+        "glossary_ready": st.session_state.get("glossary_ready", False),
+        "glossary_pending_terms": st.session_state.get("glossary_pending_terms", []),
+        "glossary_cursor": st.session_state.get("glossary_cursor", 0),
+    }
+    has_meaningful_state = any(
+        [
+            state.get("source_root"),
+            state.get("source_en_root"),
+            state.get("source_es_input"),
+            state.get("discovered_files"),
+            state.get("selected_file_path"),
+            state.get("last_target"),
+            int(state.get("idx", 0) or 0) > 0,
+            state.get("glossary_scan_done"),
+            state.get("batch_active"),
+        ]
+    )
+    if not has_meaningful_state:
+        return
+    save_run_state(state)
+
+
+def _aplicar_estado(saved: dict, force: bool = False):
+    if not saved:
+        return
+    default_map = {
+        "source_root": "",
+        "source_en_root": "",
+        "source_es_input": "",
+        "source_es_root": "",
+        "output_root": str(Path.cwd() / "build" / "pt-BR"),
+        "source_mode": "Diretorio",
+        "discovered_files": [],
+        "selected_file_path": None,
+        "last_target": None,
+        "progress_key": None,
+        "idx": 0,
+        "batch_active": False,
+        "batch_queue": [],
+        "batch_cursor": 0,
+        "glossary_scan_done": False,
+        "glossary_ready": False,
+        "glossary_pending_terms": [],
+        "glossary_cursor": 0,
+    }
+    for key, default in default_map.items():
+        if force or key not in st.session_state or st.session_state.get(key) in (None, "", [], False):
+            st.session_state[key] = saved.get(key, default)
+
+    # Sincroniza widgets-chave para refletir estado retomado.
+    st.session_state["source_root_input"] = st.session_state.get("source_root", "")
+    st.session_state["source_es_input"] = st.session_state.get("source_es_input", "")
+    st.session_state["output_root_input"] = st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR"))
+
+
+def aplicar_estado_salvo_no_session():
+    if st.session_state.get("_run_state_loaded"):
+        return
+    saved = load_run_state()
+    st.session_state._saved_run_state = saved
+    _aplicar_estado(saved, force=False)
+    st.session_state._run_state_loaded = True
+
+
+def render_resume_controls():
+    saved = st.session_state.get("_saved_run_state", {})
+    if not saved:
+        return
+
+    source_root = saved.get("source_root", "")
+    selected_file = saved.get("selected_file_path")
+    idx = int(saved.get("idx", 0) or 0)
+    glossary_done = bool(saved.get("glossary_ready", False))
+    batch_active = bool(saved.get("batch_active", False))
+    st.info("Processo anterior detectado. Voce pode retomar ou reiniciar.")
+    st.caption(f"EN root: `{source_root or '-'}`")
+    st.caption(f"ES root: `{saved.get('source_es_root') or '-'}`")
+    st.caption(f"Arquivo alvo: `{selected_file or '-'}` | Entrada: `{idx}`")
+    st.caption(f"Glossario concluido: `{glossary_done}` | Lote ativo: `{batch_active}`")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Retomar de onde parou", key="resume_previous_run"):
+            _aplicar_estado(saved, force=True)
+            st.session_state._resume_applied = True
+            persist_run_state()
+            st.rerun()
+    with col2:
+        if st.button("Reiniciar do comeco (manter configuracoes)", key="restart_current_settings"):
+            st.session_state.idx = 0
+            st.session_state.cache = {}
+            st.session_state.last_target = None
+            st.session_state.batch_cursor = 0
+            st.session_state.batch_active = False
+            st.session_state.batch_queue = []
+            st.session_state.selected_file_path = (
+                st.session_state.get("discovered_files", [None])[0]
+                if st.session_state.get("discovered_files")
+                else st.session_state.get("selected_file_path")
+            )
+            persist_run_state()
+            st.rerun()
 
 def render_glossary_step(client, model_name: str):
     discovered_files = st.session_state.get("discovered_files", [])
@@ -260,6 +382,12 @@ def render_directory_selector():
         return None
 
     labels = [o[0] for o in opcoes]
+    selected_file_saved = st.session_state.get("selected_file_path")
+    if selected_file_saved:
+        for rel_label, full_path in opcoes:
+            if full_path == selected_file_saved:
+                st.session_state["selected_relpath"] = rel_label
+                break
     selected_label = st.selectbox("Arquivo para traduzir", labels, key="selected_relpath")
     selected_map = dict(opcoes)
     selected_file_path = selected_map[selected_label]
@@ -307,6 +435,21 @@ def render_sidebar_progress():
         st.progress(percent / 100)
         st.write(f"**{concluidos}** de **{total}** arquivos")
 
+        col_reset_g, col_reset_p = st.columns(2)
+        with col_reset_g:
+            if st.button("Resetar glossario"):
+                resetar_glossario_usuario()
+                reset_glossary_step()
+                persist_run_state()
+                st.success("Glossario de usuario resetado.")
+                st.rerun()
+        with col_reset_p:
+            if st.button("Resetar progresso"):
+                st.session_state.progresso.reset_all_status()
+                persist_run_state()
+                st.success("Relatorio de progresso resetado.")
+                st.rerun()
+
         st.divider()
         with st.expander("Checklist de Arquivos"):
             busca = st.text_input("Buscar no checklist")
@@ -353,14 +496,27 @@ if "glossary_suggestions" not in st.session_state:
     st.session_state.glossary_suggestions = {}
 if "glossary_term_contexts" not in st.session_state:
     st.session_state.glossary_term_contexts = {}
+if "_run_state_loaded" not in st.session_state:
+    st.session_state._run_state_loaded = False
+if "_saved_run_state" not in st.session_state:
+    st.session_state._saved_run_state = {}
+if "_resume_applied" not in st.session_state:
+    st.session_state._resume_applied = False
+
+aplicar_estado_salvo_no_session()
 
 render_sidebar_progress()
+render_resume_controls()
+if st.session_state.get("_resume_applied"):
+    st.success("Retomando processo salvo anteriormente.")
+    st.session_state._resume_applied = False
 client, model_name = init_translation_client()
 
 source_mode = st.radio(
     "Modo de entrada",
     options=["Diretorio", "Arquivo unico (legado)"],
     horizontal=True,
+    key="source_mode",
 )
 
 selected_path = None
@@ -378,13 +534,22 @@ else:
         target_id = f"upload::{uploaded_file.name}"
 
 if not target_id:
+    persist_run_state()
     st.stop()
 
 if source_mode == "Diretorio":
     if not render_glossary_step(client, model_name):
+        persist_run_state()
         st.stop()
 
 if st.session_state.get("last_target") != target_id or "tree" not in st.session_state:
+    resume_idx = 0
+    if "tree" not in st.session_state and st.session_state.get("last_target") == target_id:
+        try:
+            resume_idx = int(st.session_state.get("idx", 0) or 0)
+        except Exception:
+            resume_idx = 0
+
     tree, root, display_name, progress_key = load_tree_from_target(
         source_mode,
         selected_path,
@@ -403,6 +568,8 @@ if st.session_state.get("last_target") != target_id or "tree" not in st.session_
         st.session_state.es_file_path = None
     st.session_state.progress_key = progress_key
     reset_translation_state(target_id)
+    if resume_idx > 0:
+        st.session_state.idx = min(resume_idx, max(0, len(st.session_state.entries) - 1))
 else:
     if source_mode == "Diretorio":
         display_name = Path(selected_path).name
@@ -445,13 +612,15 @@ while st.session_state.idx < len(st.session_state.entries):
                 st.caption(f"Detalhe tecnico: {exc}")
                 if st.button("Tentar novamente", key=f"retry_api_{idx}"):
                     st.rerun()
+                persist_run_state()
                 st.stop()
             except TranslationResponseError as exc:
-                logger.exception("Resposta invalida na entrada %s", idx)
+                logger.warning("Resposta invalida na entrada %s: %s", idx, exc)
                 st.error("A resposta do Gemini veio em formato inesperado.")
                 st.caption(f"Detalhe tecnico: {exc}")
                 if st.button("Tentar novamente", key=f"retry_json_{idx}"):
                     st.rerun()
+                persist_run_state()
                 st.stop()
 
     res = st.session_state.cache[idx]
@@ -578,3 +747,5 @@ if zip_path:
                 file_name=zip_file.name,
                 mime="application/zip",
             )
+
+persist_run_state()

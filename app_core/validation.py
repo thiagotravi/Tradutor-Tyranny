@@ -88,7 +88,7 @@ def validar_traducao_com_es(texto_en: str, texto_es: str, texto_pt: str):
         issues.append(
             {
                 "code": "linebreak_mismatch",
-                "severity": "review",
+                "severity": "block",
                 "message": "Quantidade de quebras de linha difere entre EN e PT.",
             }
         )

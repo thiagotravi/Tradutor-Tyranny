@@ -12,6 +12,7 @@ env/
 # Dados e Chaves (Não suba sua API KEY!)
 progress_data.json
 data/progress_data.json
+data/run_state.json
 .env
 
 # Arquivos de tradução (opcional, se quiser versionar apenas o código)

@@ -53,6 +53,12 @@ class ProgressManager:
         with open(self.save_path, 'w') as f:
             json.dump(self.progress, f, indent=4)
 
+    def reset_all_status(self):
+        for k in list(self.progress.keys()):
+            self.progress[k] = False
+        with open(self.save_path, 'w') as f:
+            json.dump(self.progress, f, indent=4)
+
     def get_stats(self):
         total = len(self.progress)
         concluidos = sum(1 for v in self.progress.values() if v)
