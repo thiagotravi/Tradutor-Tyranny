@@ -1,5 +1,6 @@
 import json
-from config_traducao import GLOSSARIO, GUIA_ESTILO
+from config_traducao import GUIA_ESTILO
+from app_core.glossary import obter_glossario_completo
 
 
 class TranslationError(Exception):
@@ -55,7 +56,7 @@ def normalizar_resposta(data):
     }
 
 
-def montar_prompt(texto_en: str, instrucoes_voz: str) -> str:
+def montar_prompt(texto_en: str, instrucoes_voz: str, glossario: dict) -> str:
     return f"""
 Você é um Localizador sênior para o RPG "Tyranny".
 
@@ -70,7 +71,7 @@ REGRA DE DECISÃO:
 - Se o texto for uma fala ou descrição de história, use o ESTILO NARRATIVO e o CONTEXTO ESPECÍFICO fornecido.
 
 GLOSSÁRIO OBRIGATÓRIO:
-{json.dumps(GLOSSARIO, ensure_ascii=False, indent=2)}
+{json.dumps(glossario, ensure_ascii=False, indent=2)}
 
 REGRAS DE OURO:
 1. Mantenha EXATAMENTE as quebras de linha (\\n) originais.
@@ -90,11 +91,11 @@ Texto original:
 """
 
 
-def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: str):
+def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: str, glossario: dict | None = None):
     if not texto_en or texto_en.strip() == "":
         return {"traducao_padrao": "", "traducao_feminina": "", "confianca": 10}
 
-    prompt = montar_prompt(texto_en, instrucoes_voz)
+    prompt = montar_prompt(texto_en, instrucoes_voz, glossario or obter_glossario_completo())
     try:
         response = client.models.generate_content(
             model=model_name,
@@ -109,3 +110,27 @@ def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: st
         return normalizar_resposta(data)
     except json.JSONDecodeError as exc:
         raise TranslationResponseError("Gemini retornou JSON invalido.") from exc
+
+
+def sugerir_traducao_glossario(client, model_name: str, termo_en: str, termo_es: str = "") -> str:
+    prompt = f"""
+Voce e um localizador de RPG. Sugira a melhor traducao PT-BR para o termo de glossario abaixo.
+Considere manter nomes proprios quando apropriado.
+Se houver referencia oficial em espanhol, use apenas para evitar inconsistencias.
+
+Termo EN: {termo_en}
+Termo ES (opcional): {termo_es}
+
+Retorne APENAS JSON:
+{{
+  "traducao_sugerida": "..."
+}}
+"""
+    try:
+        response = client.models.generate_content(model=model_name, contents=prompt)
+        txt_json = extrair_json_resposta(getattr(response, "text", ""))
+        data = json.loads(txt_json)
+        suggested = str(data.get("traducao_sugerida", "")).strip()
+        return suggested if suggested else termo_en
+    except Exception:
+        return termo_en

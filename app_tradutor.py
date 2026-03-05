@@ -19,9 +19,17 @@ from app_core.translator import (
     TranslationResponseError,
     normalizar_traducao_feminina,
     processar_entrada,
+    sugerir_traducao_glossario,
 )
 from app_core.validation import validar_traducao_com_es
 from translation_progress import ProgressManager
+from app_core.glossary import (
+    carregar_glossario_usuario,
+    coletar_contexto_termos_glossario_em_arquivos,
+    coletar_termos_glossario_em_arquivos,
+    obter_glossario_completo,
+    salvar_glossario_usuario,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +93,103 @@ def carregar_entradas_es_para_arquivo(selected_path: str):
         return None
 
 
+def reset_glossary_step():
+    st.session_state.glossary_scan_done = False
+    st.session_state.glossary_ready = False
+    st.session_state.glossary_pending_terms = []
+    st.session_state.glossary_cursor = 0
+    st.session_state.glossary_suggestions = {}
+    st.session_state.glossary_term_contexts = {}
+
+
+def render_glossary_step(client, model_name: str):
+    discovered_files = st.session_state.get("discovered_files", [])
+    if not discovered_files:
+        st.info("Carregue os arquivos para iniciar a etapa de glossario.")
+        return False
+
+    st.subheader("Etapa 1: Construir glossario (obrigatorio)")
+    if not st.session_state.get("glossary_scan_done"):
+        if st.button("Escanear termos de glossario", key="scan_glossary_terms"):
+            termos_encontrados = coletar_termos_glossario_em_arquivos(discovered_files)
+            contextos = coletar_contexto_termos_glossario_em_arquivos(discovered_files)
+            glossario = obter_glossario_completo()
+            existing_low = {k.lower() for k in glossario.keys()}
+            pendentes = [t for t in termos_encontrados if t.lower() not in existing_low]
+            st.session_state.glossary_pending_terms = pendentes
+            st.session_state.glossary_term_contexts = contextos
+            st.session_state.glossary_cursor = 0
+            st.session_state.glossary_scan_done = True
+            st.session_state.glossary_ready = len(pendentes) == 0
+            st.rerun()
+        st.info("Escaneie os arquivos para identificar termos faltantes em [url=glossary:...].")
+        return False
+
+    pendentes = st.session_state.get("glossary_pending_terms", [])
+    if not pendentes:
+        st.success("Glossario pronto. Nenhum termo pendente.")
+        st.session_state.glossary_ready = True
+        return True
+
+    cursor = st.session_state.get("glossary_cursor", 0)
+    if cursor >= len(pendentes):
+        st.session_state.glossary_ready = True
+        st.success("Glossario concluido.")
+        return True
+
+    termo = pendentes[cursor]
+    st.warning(f"Termo pendente {cursor + 1}/{len(pendentes)}: `{termo}`")
+    st.text_input(
+        "Termo original (EN)",
+        value=termo,
+        disabled=True,
+        key=f"term_en_{cursor}_{termo}",
+    )
+    contextos = st.session_state.get("glossary_term_contexts", {}).get(termo, [])
+    if contextos:
+        source_en_root = st.session_state.get("source_en_root", "")
+        with st.expander("Contexto de ocorrencia (EN)", expanded=True):
+            for i, item in enumerate(contextos, start=1):
+                file_full = item.get("file", "")
+                file_rel = relpath_display(Path(file_full), source_en_root) if source_en_root else file_full
+                line_no = item.get("line", "?")
+                excerpt = item.get("excerpt", "")
+                st.markdown(f"**{i}.** `{file_rel}` (linha {line_no})")
+                st.code(excerpt, language="text")
+    suggestions = st.session_state.get("glossary_suggestions", {})
+    sugestao = suggestions.get(termo, "")
+    if not sugestao:
+        with st.spinner("Gerando sugestao de traducao..."):
+            sugestao = sugerir_traducao_glossario(client, model_name, termo_en=termo)
+        suggestions[termo] = sugestao
+        st.session_state.glossary_suggestions = suggestions
+
+    st.text_input("Sugestao do tradutor", value=sugestao, disabled=True, key=f"sugg_{cursor}_{termo}")
+    termo_custom = st.text_input(
+        "Traducao final (edite se necessario)",
+        value=sugestao,
+        key=f"custom_{cursor}_{termo}",
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Salvar termo e continuar", key=f"save_term_{cursor}_{termo}"):
+            glossario_user = carregar_glossario_usuario()
+            glossario_user[termo] = termo_custom.strip() or sugestao or termo
+            salvar_glossario_usuario(glossario_user)
+            st.session_state.glossary_cursor = cursor + 1
+            st.rerun()
+    with col_b:
+        if st.button("Pular termo (manter original)", key=f"skip_term_{cursor}_{termo}"):
+            glossario_user = carregar_glossario_usuario()
+            glossario_user[termo] = termo
+            salvar_glossario_usuario(glossario_user)
+            st.session_state.glossary_cursor = cursor + 1
+            st.rerun()
+
+    return False
+
+
 def render_directory_selector():
     st.subheader("Fonte de Arquivos")
     root_path = st.text_input(
@@ -100,6 +205,7 @@ def render_directory_selector():
             st.session_state.source_en_root = str(source_en_root)
             st.session_state.discovered_files = [str(p) for p in arquivos]
             st.session_state.selected_file_path = st.session_state.discovered_files[0] if arquivos else None
+            reset_glossary_step()
             if not st.session_state.get("output_root"):
                 st.session_state.output_root = str(Path.cwd() / "build" / "pt-BR")
             es_root_input = st.session_state.get("source_es_input", "").strip()
@@ -234,6 +340,18 @@ if "batch_zip_path" not in st.session_state:
     st.session_state.batch_zip_path = ""
 if "es_entries" not in st.session_state:
     st.session_state.es_entries = None
+if "glossary_scan_done" not in st.session_state:
+    st.session_state.glossary_scan_done = False
+if "glossary_ready" not in st.session_state:
+    st.session_state.glossary_ready = False
+if "glossary_pending_terms" not in st.session_state:
+    st.session_state.glossary_pending_terms = []
+if "glossary_cursor" not in st.session_state:
+    st.session_state.glossary_cursor = 0
+if "glossary_suggestions" not in st.session_state:
+    st.session_state.glossary_suggestions = {}
+if "glossary_term_contexts" not in st.session_state:
+    st.session_state.glossary_term_contexts = {}
 
 render_sidebar_progress()
 client, model_name = init_translation_client()
@@ -260,6 +378,10 @@ else:
 
 if not target_id:
     st.stop()
+
+if source_mode == "Diretorio":
+    if not render_glossary_step(client, model_name):
+        st.stop()
 
 if st.session_state.get("last_target") != target_id or "tree" not in st.session_state:
     tree, root, display_name, progress_key = load_tree_from_target(
@@ -304,6 +426,7 @@ while st.session_state.idx < len(st.session_state.entries):
                     model_name=model_name,
                     texto_en=txt_en,
                     instrucoes_voz=instrucoes_dinamicas,
+                    glossario=obter_glossario_completo(),
                 )
             except TranslationAPIError as exc:
                 logger.exception("Erro de API na entrada %s", idx)
