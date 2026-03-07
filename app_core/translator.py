@@ -1,9 +1,11 @@
 import json
+import logging
 import re
 import time
 from config_traducao import GUIA_ESTILO
 from app_core.glossary import obter_glossario_completo
 
+logger = logging.getLogger(__name__)
 
 class TranslationError(Exception):
     """Erro base de traducao."""
@@ -153,6 +155,7 @@ def _gerar_e_parsear_json(client, model_name: str, prompt: str):
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
+                config={"response_mime_type": "application/json"},
             )
             break
         except Exception as exc:
@@ -228,7 +231,7 @@ def normalizar_resposta(data):
     }
 
 
-def montar_prompt(texto_en: str, instrucoes_voz: str, glossario: dict) -> str:
+def montar_prompt(texto_en: str, texto_es: str, instrucoes_voz: str, glossario: dict) -> str:
     return f"""
 Você é um Localizador sênior para o RPG "Tyranny".
 
@@ -241,9 +244,12 @@ CONTEXTO ESPECÍFICO DE PERSONAGEM/FACÇÃO:
 REGRA DE DECISÃO:
 - Se o texto original contiver explicações de atributos, danos, armas ou regras (mecânicas), use o ESTILO MECÂNICO.
 - Se o texto for uma fala ou descrição de história, use o ESTILO NARRATIVO e o CONTEXTO ESPECÍFICO fornecido.
+- Use a referência em espanhol para determinar gênero (masculino/feminino) e o nível de formalidade (Tu/Você/Vós), mas nunca traduza diretamente do espanhol.
 
 GLOSSÁRIO OBRIGATÓRIO:
+<glossary>
 {json.dumps(glossario, ensure_ascii=False, indent=2)}
+</glossary>
 
 REGRAS DE OURO:
 1. Mantenha EXATAMENTE as quebras de linha (\\n) originais.
@@ -261,17 +267,32 @@ RETORNE APENAS JSON:
   "confianca": 10
 }}
 
-Texto original:
+<english>
 {texto_en}
+</english>
+<spanish_reference>
+{texto_es or ""}
+</spanish_reference>
 """
 
 
-def processar_entrada(client, model_name: str, texto_en: str, instrucoes_voz: str, glossario: dict | None = None):
+def processar_entrada(
+    client,
+    model_name: str,
+    texto_en: str,
+    texto_es: str,
+    instrucoes_voz: str,
+    glossario: dict | None = None,
+):
     if not texto_en or texto_en.strip() == "":
         return {"traducao_padrao": "", "traducao_feminina": "", "confianca": 10}
 
     glossario_final = glossario or obter_glossario_completo()
-    prompt = montar_prompt(texto_en, instrucoes_voz, glossario_final)
+    prompt = montar_prompt(texto_en, texto_es, instrucoes_voz, glossario_final)
+    logger.info("Prompt de traducao contem referencia ES: %s", bool((texto_es or "").strip()))
+    logger.info("Prompt preview: %s", prompt[:800].replace("\n", "\\n"))
+    if (texto_es or "").strip():
+        print(f"[translator] spanish_reference_preview: {(texto_es or '')[:220]}")
     try:
         data = _gerar_e_parsear_json(client, model_name, prompt)
     except TranslationAPIError:
@@ -368,7 +389,11 @@ Retorne APENAS JSON:
 }}
 """
     try:
-        response = client.models.generate_content(model=model_name, contents=prompt)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config={"response_mime_type": "application/json"},
+        )
         txt_json = extrair_json_resposta(getattr(response, "text", ""))
         data = json.loads(txt_json)
         suggested = str(data.get("traducao_sugerida", "")).strip()

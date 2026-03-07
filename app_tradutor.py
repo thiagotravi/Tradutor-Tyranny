@@ -603,6 +603,7 @@ while st.session_state.idx < len(st.session_state.entries):
                     client=client,
                     model_name=model_name,
                     texto_en=txt_en,
+                    texto_es=txt_es,
                     instrucoes_voz=instrucoes_dinamicas,
                     glossario=obter_glossario_completo(),
                 )
