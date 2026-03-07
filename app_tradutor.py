@@ -21,7 +21,7 @@ from app_core.translator import (
     processar_lote_entrada,
     sugerir_traducao_glossario,
 )
-from app_core.validation import validar_traducao_com_es
+from app_core.validation import precisa_auditoria, validar_traducao_com_es
 from app_core.run_state import load_run_state, save_run_state
 from translation_progress import ProgressManager
 from app_core.glossary import (
@@ -121,6 +121,8 @@ def persist_run_state():
         "batch_active": st.session_state.get("batch_active", False),
         "batch_queue": st.session_state.get("batch_queue", []),
         "batch_cursor": st.session_state.get("batch_cursor", 0),
+        "run_mode": st.session_state.get("run_mode", "standby"),
+        "stop_requested": st.session_state.get("stop_requested", False),
         "glossary_scan_done": st.session_state.get("glossary_scan_done", False),
         "glossary_ready": st.session_state.get("glossary_ready", False),
         "glossary_pending_terms": st.session_state.get("glossary_pending_terms", []),
@@ -162,6 +164,8 @@ def _aplicar_estado(saved: dict, force: bool = False):
         "batch_active": False,
         "batch_queue": [],
         "batch_cursor": 0,
+        "run_mode": "standby",
+        "stop_requested": False,
         "glossary_scan_done": False,
         "glossary_ready": False,
         "glossary_pending_terms": [],
@@ -183,6 +187,9 @@ def aplicar_estado_salvo_no_session():
     saved = load_run_state()
     st.session_state._saved_run_state = saved
     _aplicar_estado(saved, force=False)
+    # Ao abrir o app, sempre inicia em espera; retomar exige comando explicito.
+    st.session_state.run_mode = "standby"
+    st.session_state.stop_requested = False
     st.session_state._run_state_loaded = True
 
 
@@ -196,16 +203,19 @@ def render_resume_controls():
     idx = int(saved.get("idx", 0) or 0)
     glossary_done = bool(saved.get("glossary_ready", False))
     batch_active = bool(saved.get("batch_active", False))
+    saved_mode = saved.get("run_mode", "standby")
     st.info("Processo anterior detectado. Voce pode retomar ou reiniciar.")
     st.caption(f"EN root: `{source_root or '-'}`")
     st.caption(f"ES root: `{saved.get('source_es_root') or '-'}`")
     st.caption(f"Arquivo alvo: `{selected_file or '-'}` | Entrada: `{idx}`")
-    st.caption(f"Glossario concluido: `{glossary_done}` | Lote ativo: `{batch_active}`")
+    st.caption(f"Glossario concluido: `{glossary_done}` | Lote ativo: `{batch_active}` | Modo salvo: `{saved_mode}`")
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Retomar de onde parou", key="resume_previous_run"):
             _aplicar_estado(saved, force=True)
+            st.session_state.run_mode = "running"
+            st.session_state.stop_requested = False
             st.session_state._resume_applied = True
             persist_run_state()
             st.rerun()
@@ -217,6 +227,8 @@ def render_resume_controls():
             st.session_state.batch_cursor = 0
             st.session_state.batch_active = False
             st.session_state.batch_queue = []
+            st.session_state.run_mode = "standby"
+            st.session_state.stop_requested = False
             st.session_state.selected_file_path = (
                 st.session_state.get("discovered_files", [None])[0]
                 if st.session_state.get("discovered_files")
@@ -393,19 +405,44 @@ def render_directory_selector():
     selected_map = dict(opcoes)
     selected_file_path = selected_map[selected_label]
 
-    col_start, col_stop = st.columns(2)
+    col_single, col_start, col_stop = st.columns(3)
+    with col_single:
+        if st.button("Iniciar arquivo selecionado"):
+            st.session_state.batch_active = False
+            st.session_state.batch_queue = []
+            st.session_state.batch_cursor = 0
+            st.session_state.run_mode = "running"
+            st.session_state.stop_requested = False
+            st.session_state.selected_file_path = selected_file_path
+            st.rerun()
     with col_start:
         if st.button("Iniciar lote (arquivos filtrados)"):
             st.session_state.batch_queue = [full for _, full in opcoes]
             st.session_state.batch_cursor = 0
             st.session_state.batch_active = len(st.session_state.batch_queue) > 0
             st.session_state.batch_zip_path = ""
+            st.session_state.run_mode = "running"
+            st.session_state.stop_requested = False
             st.rerun()
     with col_stop:
         if st.button("Parar lote"):
             st.session_state.batch_active = False
             st.session_state.batch_queue = []
             st.session_state.batch_cursor = 0
+            st.session_state.run_mode = "paused"
+            st.session_state.stop_requested = True
+            st.rerun()
+
+    if st.button("Processar Próximo Arquivo Automaticamente"):
+        queue = list(st.session_state.get("discovered_files", []))
+        if queue:
+            start_idx = queue.index(selected_file_path) if selected_file_path in queue else 0
+            st.session_state.batch_queue = queue
+            st.session_state.batch_cursor = start_idx
+            st.session_state.batch_active = True
+            st.session_state.batch_zip_path = ""
+            st.session_state.run_mode = "running"
+            st.session_state.stop_requested = False
             st.rerun()
 
     if st.session_state.get("batch_active"):
@@ -435,6 +472,7 @@ def render_sidebar_progress():
         total, concluidos, percent = st.session_state.progresso.get_stats()
         st.progress(percent / 100)
         st.write(f"**{concluidos}** de **{total}** arquivos")
+        st.write(f"**Auditoria pendente:** {len(st.session_state.progresso.get_audit_items())}")
 
         col_reset_g, col_reset_p = st.columns(2)
         with col_reset_g:
@@ -466,6 +504,60 @@ def render_sidebar_progress():
                         st.rerun()
 
 
+def render_audit_queue_section():
+    with st.expander("🔍 Fila de Auditoria", expanded=False):
+        audit_items = st.session_state.progresso.get_audit_items()
+        if not audit_items:
+            st.success("Nenhuma entrada pendente de auditoria.")
+            return
+
+        st.caption(f"Itens pendentes: {len(audit_items)}")
+        filtro = st.text_input("Filtrar auditoria por arquivo", value="", key="audit_filter")
+        current_file_only = st.checkbox("Somente arquivo atual", value=False, key="audit_current_only")
+        current_key = st.session_state.get("progress_key")
+
+        rows = audit_items
+        if current_file_only and current_key:
+            rows = [r for r in rows if r.get("file") == current_key]
+        if filtro:
+            rows = [r for r in rows if filtro.lower() in str(r.get("file", "")).lower()]
+
+        if not rows:
+            st.info("Nenhum item corresponde ao filtro.")
+            return
+
+        for i, item in enumerate(rows, start=1):
+            file_name = item.get("file", "-")
+            entry_idx = item.get("entry_idx", "-")
+            conf = item.get("confidence", "-")
+            status = item.get("validation_status", "-")
+            needs_audit = item.get("needs_audit", True)
+            issues = item.get("issues", [])
+            faltantes = item.get("missing_terms", [])
+            with st.container():
+                st.markdown(f"**{i}.** `{file_name}` | entrada `{entry_idx}` | conf `{conf}` | status `{status}` | needs_audit `{needs_audit}`")
+                if issues:
+                    for issue in issues:
+                        st.write(f"- [{issue.get('severity')}] {issue.get('message')}")
+                if faltantes:
+                    st.write(f"- Termos faltantes: {', '.join(faltantes)}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Ir para entrada", key=f"audit_jump_{file_name}_{entry_idx}_{i}"):
+                        if file_name == st.session_state.get("progress_key"):
+                            try:
+                                st.session_state.idx = int(entry_idx)
+                                st.rerun()
+                            except Exception:
+                                pass
+                        else:
+                            st.info("Abra o arquivo correspondente para navegar nesta entrada.")
+                with col2:
+                    if st.button("Marcar como auditado", key=f"audit_done_{file_name}_{entry_idx}_{i}"):
+                        st.session_state.progresso.clear_audit_item(file_name, entry_idx)
+                        st.rerun()
+
+
 st.set_page_config(page_title="Tyranny Localizer v0.7", layout="wide")
 st.title("Estacao Seladestinos v0.7")
 
@@ -481,6 +573,10 @@ if "batch_cursor" not in st.session_state:
     st.session_state.batch_cursor = 0
 if "batch_zip_path" not in st.session_state:
     st.session_state.batch_zip_path = ""
+if "run_mode" not in st.session_state:
+    st.session_state.run_mode = "standby"
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
 if "es_entries" not in st.session_state:
     st.session_state.es_entries = None
 if "es_file_path" not in st.session_state:
@@ -508,6 +604,7 @@ aplicar_estado_salvo_no_session()
 
 render_sidebar_progress()
 render_resume_controls()
+render_audit_queue_section()
 if st.session_state.get("_resume_applied"):
     st.success("Retomando processo salvo anteriormente.")
     st.session_state._resume_applied = False
@@ -584,6 +681,21 @@ if source_mode == "Diretorio" and st.session_state.get("source_es_root"):
     else:
         st.warning("Referencia ES nao encontrada para o arquivo selecionado.")
 
+run_mode = st.session_state.get("run_mode", "standby")
+if run_mode != "running":
+    if run_mode == "paused":
+        st.info("Traducao pausada. Use 'Retomar de onde parou' ou clique em um comando de inicio.")
+    else:
+        st.info("Aplicacao em standby. Escolha um arquivo/filtro e clique em um comando de inicio.")
+    persist_run_state()
+    st.stop()
+
+if st.session_state.get("stop_requested"):
+    st.session_state.run_mode = "paused"
+    persist_run_state()
+    st.info("Parada solicitada. Processo pausado.")
+    st.stop()
+
 while st.session_state.idx < len(st.session_state.entries):
     idx = st.session_state.idx
     total_entries = len(st.session_state.entries)
@@ -637,7 +749,7 @@ while st.session_state.idx < len(st.session_state.entries):
                 persist_run_state()
                 st.stop()
 
-    interrompido_para_revisao = False
+    audit_flagged_in_chunk = 0
     while st.session_state.idx < chunk_end:
         idx = st.session_state.idx
         entry = st.session_state.entries[idx]
@@ -656,69 +768,48 @@ while st.session_state.idx < len(st.session_state.entries):
             texto_es=txt_es,
             texto_pt=res.get("traducao_padrao", ""),
         )
-        tem_inconsistencia = validacao["status"] in {"review", "block"}
+        needs_audit = precisa_auditoria(
+            int(res.get("confianca", 0) or 0),
+            validacao["status"],
+        ) or bool(faltantes)
 
-        if res.get("confianca", 0) >= 10 and not faltantes and not tem_inconsistencia:
-            if txt_node is not None:
-                txt_node.text = res.get("traducao_padrao", "")
-            f_node = entry.find("FemaleText")
-            if f_node is not None:
-                fem_final = normalizar_traducao_feminina(
-                    res.get("traducao_padrao", ""),
-                    res.get("traducao_feminina", ""),
-                )
-                f_node.text = fem_final if fem_final else None
-            st.session_state.idx += 1
+        if txt_node is not None:
+            txt_node.text = res.get("traducao_padrao", "")
+        f_node = entry.find("FemaleText")
+        if f_node is not None:
+            fem_final = normalizar_traducao_feminina(
+                res.get("traducao_padrao", ""),
+                res.get("traducao_feminina", ""),
+            )
+            f_node.text = fem_final if fem_final else None
+
+        if needs_audit:
+            audit_flagged_in_chunk += 1
+            st.session_state.progresso.add_or_update_audit_item(
+                {
+                    "file": st.session_state.get("progress_key"),
+                    "entry_idx": idx,
+                    "needs_audit": True,
+                    "confidence": int(res.get("confianca", 0) or 0),
+                    "validation_status": validacao.get("status"),
+                    "issues": validacao.get("issues", []),
+                    "missing_terms": faltantes,
+                    "original_en": txt_en,
+                    "reference_es": txt_es,
+                    "translated_pt": res.get("traducao_padrao", ""),
+                    "translated_feminine": res.get("traducao_feminina", ""),
+                }
+            )
         else:
-            st.warning(f"INTERVENCAO NECESSARIA (Entrada {idx})")
-            if faltantes:
-                st.error(f"Termos nao mapeados no glossario: {', '.join(faltantes)}")
-            if validacao["issues"]:
-                st.warning("Inconsistencias detectadas na validacao EN/ES/PT:")
-                for issue in validacao["issues"]:
-                    st.write(f"- [{issue['severity']}] {issue['message']}")
-            if st.session_state.get("source_es_root") and not st.session_state.get("es_file_path"):
-                st.info("Arquivo de referencia ES correspondente nao foi encontrado para este arquivo EN.")
+            st.session_state.progresso.clear_audit_item(
+                st.session_state.get("progress_key"),
+                idx,
+            )
 
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.text_area("Original (EN):", value=txt_en, height=350, disabled=True)
-            with col2:
-                st.text_area("Referencia (ES):", value=txt_es, height=350, disabled=True)
-            with col3:
-                edit_p = st.text_area(
-                    "Padrao:",
-                    value=res.get("traducao_padrao", ""),
-                    height=350,
-                    key=f"p_{idx}",
-                )
-            with col4:
-                sugestao_fem = normalizar_traducao_feminina(
-                    res.get("traducao_padrao", ""),
-                    res.get("traducao_feminina", ""),
-                )
-                edit_f = st.text_area(
-                    "Feminino:",
-                    value=sugestao_fem,
-                    height=350,
-                    key=f"f_{idx}",
-                )
+        st.session_state.idx += 1
 
-            if st.button("Aprovar Entrada", key=f"approve_{idx}"):
-                if txt_node is not None:
-                    txt_node.text = edit_p
-                f_node = entry.find("FemaleText")
-                if f_node is not None:
-                    fem_final = normalizar_traducao_feminina(edit_p, edit_f)
-                    f_node.text = fem_final if fem_final else None
-                st.session_state.idx += 1
-                st.rerun()
-
-            interrompido_para_revisao = True
-            break
-
-    if interrompido_para_revisao:
-        break
+    if audit_flagged_in_chunk > 0:
+        st.warning(f"Lote concluido com {audit_flagged_in_chunk} entrada(s) marcadas para auditoria.")
 else:
     st.success("Arquivo finalizado!")
     st.session_state.progresso.update_status(st.session_state.progress_key, True)
@@ -753,6 +844,7 @@ else:
             st.session_state.batch_active = False
             st.session_state.batch_queue = []
             st.session_state.batch_cursor = 0
+            st.session_state.run_mode = "standby"
             try:
                 zip_path = gerar_zip_da_saida(
                     output_root=st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
@@ -763,6 +855,8 @@ else:
                 st.error("Nao foi possivel gerar o zip da traducao.")
                 st.caption(f"Detalhe tecnico: {exc}")
             st.success("Lote finalizado com sucesso.")
+    else:
+        st.session_state.run_mode = "standby"
 
 xml_output = ET.tostring(st.session_state.root, encoding="utf-8", xml_declaration=True)
 st.download_button("Baixar Traducao", xml_output, file_name=f"localizado_{display_name}")
