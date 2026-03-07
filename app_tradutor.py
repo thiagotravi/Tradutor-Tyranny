@@ -18,7 +18,7 @@ from app_core.translator import (
     TranslationAPIError,
     TranslationResponseError,
     normalizar_traducao_feminina,
-    processar_entrada,
+    processar_lote_entrada,
     sugerir_traducao_glossario,
 )
 from app_core.validation import validar_traducao_com_es
@@ -34,6 +34,7 @@ from app_core.glossary import (
 )
 
 logger = logging.getLogger(__name__)
+BATCH_SIZE = 20
 
 
 def init_translation_client():
@@ -585,108 +586,138 @@ if source_mode == "Diretorio" and st.session_state.get("source_es_root"):
 
 while st.session_state.idx < len(st.session_state.entries):
     idx = st.session_state.idx
-    entry = st.session_state.entries[idx]
-    txt_node = entry.find("DefaultText")
-    txt_en = txt_node.text if txt_node is not None and txt_node.text else ""
-    txt_es = ""
-    es_entries = st.session_state.get("es_entries")
-    if es_entries and idx < len(es_entries):
-        es_txt_node = es_entries[idx].find("DefaultText")
-        txt_es = es_txt_node.text if es_txt_node is not None and es_txt_node.text else ""
-    faltantes = verificar_termos_faltantes(txt_en)
-    instrucoes_dinamicas = obter_contexto_voz(display_name)
+    total_entries = len(st.session_state.entries)
+    chunk_start = idx
+    chunk_end = min(total_entries, chunk_start + BATCH_SIZE)
+    st.progress(st.session_state.idx / max(total_entries, 1))
+    st.caption(f"Processando lote: entradas {chunk_start + 1} a {chunk_end} de {total_entries}")
 
-    if idx not in st.session_state.cache:
-        with st.spinner(f"Processando entrada {idx}..."):
+    missing_cache_indexes = [i for i in range(chunk_start, chunk_end) if i not in st.session_state.cache]
+    if missing_cache_indexes:
+        es_entries = st.session_state.get("es_entries")
+        textos_en_lote = []
+        textos_es_lote = []
+        for i in range(chunk_start, chunk_end):
+            entry_i = st.session_state.entries[i]
+            txt_node_i = entry_i.find("DefaultText")
+            textos_en_lote.append(txt_node_i.text if txt_node_i is not None and txt_node_i.text else "")
+            txt_es_i = ""
+            if es_entries and i < len(es_entries):
+                es_txt_node = es_entries[i].find("DefaultText")
+                txt_es_i = es_txt_node.text if es_txt_node is not None and es_txt_node.text else ""
+            textos_es_lote.append(txt_es_i)
+
+        instrucoes_dinamicas = obter_contexto_voz(display_name)
+        with st.spinner(f"Processando lote {chunk_start + 1}-{chunk_end}..."):
             try:
-                st.session_state.cache[idx] = processar_entrada(
+                lote_res = processar_lote_entrada(
                     client=client,
                     model_name=model_name,
-                    texto_en=txt_en,
-                    texto_es=txt_es,
+                    textos_en=textos_en_lote,
+                    textos_es=textos_es_lote,
                     instrucoes_voz=instrucoes_dinamicas,
                     glossario=obter_glossario_completo(),
                 )
+                for offset, item in enumerate(lote_res):
+                    st.session_state.cache[chunk_start + offset] = item
             except TranslationAPIError as exc:
-                logger.exception("Erro de API na entrada %s", idx)
-                st.error("Falha ao chamar o Gemini para traduzir esta entrada.")
+                logger.exception("Erro de API no lote %s-%s", chunk_start, chunk_end - 1)
+                st.error("Falha ao chamar o Gemini para traduzir este lote.")
                 st.caption(f"Detalhe tecnico: {exc}")
-                if st.button("Tentar novamente", key=f"retry_api_{idx}"):
+                if st.button("Tentar novamente", key=f"retry_api_lote_{chunk_start}"):
                     st.rerun()
                 persist_run_state()
                 st.stop()
             except TranslationResponseError as exc:
-                logger.warning("Resposta invalida na entrada %s: %s", idx, exc)
-                st.error("A resposta do Gemini veio em formato inesperado.")
+                logger.warning("Resposta invalida no lote %s-%s: %s", chunk_start, chunk_end - 1, exc)
+                st.error("A resposta do Gemini veio em formato inesperado para este lote.")
                 st.caption(f"Detalhe tecnico: {exc}")
-                if st.button("Tentar novamente", key=f"retry_json_{idx}"):
+                if st.button("Tentar novamente", key=f"retry_json_lote_{chunk_start}"):
                     st.rerun()
                 persist_run_state()
                 st.stop()
 
-    res = st.session_state.cache[idx]
-    validacao = validar_traducao_com_es(
-        texto_en=txt_en,
-        texto_es=txt_es,
-        texto_pt=res.get("traducao_padrao", ""),
-    )
-    tem_inconsistencia = validacao["status"] in {"review", "block"}
+    interrompido_para_revisao = False
+    while st.session_state.idx < chunk_end:
+        idx = st.session_state.idx
+        entry = st.session_state.entries[idx]
+        txt_node = entry.find("DefaultText")
+        txt_en = txt_node.text if txt_node is not None and txt_node.text else ""
+        txt_es = ""
+        es_entries = st.session_state.get("es_entries")
+        if es_entries and idx < len(es_entries):
+            es_txt_node = es_entries[idx].find("DefaultText")
+            txt_es = es_txt_node.text if es_txt_node is not None and es_txt_node.text else ""
 
-    if res.get("confianca", 0) >= 10 and not faltantes and not tem_inconsistencia:
-        if txt_node is not None:
-            txt_node.text = res.get("traducao_padrao", "")
-        f_node = entry.find("FemaleText")
-        if f_node is not None:
-            fem_final = normalizar_traducao_feminina(
-                res.get("traducao_padrao", ""),
-                res.get("traducao_feminina", ""),
-            )
-            f_node.text = fem_final if fem_final else None
-        st.session_state.idx += 1
-    else:
-        st.warning(f"INTERVENCAO NECESSARIA (Entrada {idx})")
-        if faltantes:
-            st.error(f"Termos nao mapeados no glossario: {', '.join(faltantes)}")
-        if validacao["issues"]:
-            st.warning("Inconsistencias detectadas na validacao EN/ES/PT:")
-            for issue in validacao["issues"]:
-                st.write(f"- [{issue['severity']}] {issue['message']}")
-        if st.session_state.get("source_es_root") and not st.session_state.get("es_file_path"):
-            st.info("Arquivo de referencia ES correspondente nao foi encontrado para este arquivo EN.")
+        faltantes = verificar_termos_faltantes(txt_en)
+        res = st.session_state.cache[idx]
+        validacao = validar_traducao_com_es(
+            texto_en=txt_en,
+            texto_es=txt_es,
+            texto_pt=res.get("traducao_padrao", ""),
+        )
+        tem_inconsistencia = validacao["status"] in {"review", "block"}
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.text_area("Original (EN):", value=txt_en, height=350, disabled=True)
-        with col2:
-            st.text_area("Referencia (ES):", value=txt_es, height=350, disabled=True)
-        with col3:
-            edit_p = st.text_area(
-                "Padrao:",
-                value=res.get("traducao_padrao", ""),
-                height=350,
-                key=f"p_{idx}",
-            )
-        with col4:
-            sugestao_fem = normalizar_traducao_feminina(
-                res.get("traducao_padrao", ""),
-                res.get("traducao_feminina", ""),
-            )
-            edit_f = st.text_area(
-                "Feminino:",
-                value=sugestao_fem,
-                height=350,
-                key=f"f_{idx}",
-            )
-
-        if st.button("Aprovar Entrada", key=f"approve_{idx}"):
+        if res.get("confianca", 0) >= 10 and not faltantes and not tem_inconsistencia:
             if txt_node is not None:
-                txt_node.text = edit_p
+                txt_node.text = res.get("traducao_padrao", "")
             f_node = entry.find("FemaleText")
             if f_node is not None:
-                fem_final = normalizar_traducao_feminina(edit_p, edit_f)
+                fem_final = normalizar_traducao_feminina(
+                    res.get("traducao_padrao", ""),
+                    res.get("traducao_feminina", ""),
+                )
                 f_node.text = fem_final if fem_final else None
             st.session_state.idx += 1
-            st.rerun()
+        else:
+            st.warning(f"INTERVENCAO NECESSARIA (Entrada {idx})")
+            if faltantes:
+                st.error(f"Termos nao mapeados no glossario: {', '.join(faltantes)}")
+            if validacao["issues"]:
+                st.warning("Inconsistencias detectadas na validacao EN/ES/PT:")
+                for issue in validacao["issues"]:
+                    st.write(f"- [{issue['severity']}] {issue['message']}")
+            if st.session_state.get("source_es_root") and not st.session_state.get("es_file_path"):
+                st.info("Arquivo de referencia ES correspondente nao foi encontrado para este arquivo EN.")
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.text_area("Original (EN):", value=txt_en, height=350, disabled=True)
+            with col2:
+                st.text_area("Referencia (ES):", value=txt_es, height=350, disabled=True)
+            with col3:
+                edit_p = st.text_area(
+                    "Padrao:",
+                    value=res.get("traducao_padrao", ""),
+                    height=350,
+                    key=f"p_{idx}",
+                )
+            with col4:
+                sugestao_fem = normalizar_traducao_feminina(
+                    res.get("traducao_padrao", ""),
+                    res.get("traducao_feminina", ""),
+                )
+                edit_f = st.text_area(
+                    "Feminino:",
+                    value=sugestao_fem,
+                    height=350,
+                    key=f"f_{idx}",
+                )
+
+            if st.button("Aprovar Entrada", key=f"approve_{idx}"):
+                if txt_node is not None:
+                    txt_node.text = edit_p
+                f_node = entry.find("FemaleText")
+                if f_node is not None:
+                    fem_final = normalizar_traducao_feminina(edit_p, edit_f)
+                    f_node.text = fem_final if fem_final else None
+                st.session_state.idx += 1
+                st.rerun()
+
+            interrompido_para_revisao = True
+            break
+
+    if interrompido_para_revisao:
         break
 else:
     st.success("Arquivo finalizado!")

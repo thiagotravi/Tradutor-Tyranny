@@ -231,6 +231,25 @@ def normalizar_resposta(data):
     }
 
 
+def _coerce_to_response_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("resultados", "items", "entries", "translations"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        # fallback: resposta veio como objeto unico
+        if any(k in data for k in ("traducao_padrao", "traducao_feminina", "confianca")):
+            return [data]
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return _coerce_to_response_list(parsed)
+        except Exception:
+            pass
+    raise TranslationResponseError("Resposta JSON nao e uma lista valida de traducoes.")
+
+
 def montar_prompt(texto_en: str, texto_es: str, instrucoes_voz: str, glossario: dict) -> str:
     return f"""
 Você é um Localizador sênior para o RPG "Tyranny".
@@ -273,6 +292,65 @@ RETORNE APENAS JSON:
 <spanish_reference>
 {texto_es or ""}
 </spanish_reference>
+"""
+
+
+def montar_prompt_lote(textos_en: list[str], textos_es: list[str], instrucoes_voz: str, glossario: dict) -> str:
+    entries_xml = []
+    for i, en_text in enumerate(textos_en):
+        es_text = textos_es[i] if i < len(textos_es) else ""
+        entries_xml.append(
+            f"""<entry index="{i}">
+<english>
+{en_text}
+</english>
+<spanish_reference>
+{es_text}
+</spanish_reference>
+</entry>"""
+        )
+
+    entries_payload = "\n".join(entries_xml)
+    return f"""
+Você é um Localizador sênior para o RPG "Tyranny".
+
+DIRETRIZES DE ESTILO:
+{GUIA_ESTILO}
+
+CONTEXTO ESPECÍFICO DE PERSONAGEM/FACÇÃO:
+{instrucoes_voz}
+
+REGRA DE DECISÃO:
+- Se o texto original contiver explicações de atributos, danos, armas ou regras (mecânicas), use o ESTILO MECÂNICO.
+- Se o texto for uma fala ou descrição de história, use o ESTILO NARRATIVO e o CONTEXTO ESPECÍFICO fornecido.
+- Use a referência em espanhol para determinar gênero (masculino/feminino) e o nível de formalidade (Tu/Você/Vós), mas nunca traduza diretamente do espanhol.
+
+GLOSSÁRIO OBRIGATÓRIO:
+<glossary>
+{json.dumps(glossario, ensure_ascii=False, indent=2)}
+</glossary>
+
+REGRAS DE OURO:
+1. Mantenha EXATAMENTE as quebras de linha (\\n) originais.
+2. Preserve todas as tags [url=glossary:...].
+3. Use o glossário para termos dentro das tags.
+4. Preencha "traducao_feminina" APENAS quando houver variacao real de genero (artigos, pronomes, adjetivos ou flexao). Se nao houver necessidade, retorne string vazia.
+5. NUNCA adicione tags [url=glossary:...] extras. O total e a ordem de tags devem ser identicos ao EN.
+6. Preserve aspas duplas (\") onde existirem no EN. Nao remova aspas de falas.
+7. Use apenas aspas duplas ASCII (\") e nunca use aspas tipograficas (ex.: “ ”).
+
+RETORNE APENAS JSON EM FORMATO DE LISTA, MANTENDO A ORDEM ORIGINAL DAS ENTRADAS:
+[
+  {{
+    "traducao_padrao": "...",
+    "traducao_feminina": "...",
+    "confianca": 10
+  }}
+]
+
+<entries>
+{entries_payload}
+</entries>
 """
 
 
@@ -372,6 +450,56 @@ Retorne APENAS JSON:
             pass
 
     return res
+
+
+def processar_lote_entrada(
+    client,
+    model_name: str,
+    textos_en: list[str],
+    textos_es: list[str],
+    instrucoes_voz: str,
+    glossario: dict | None = None,
+):
+    if not textos_en:
+        return []
+
+    glossario_final = glossario or obter_glossario_completo()
+    prompt = montar_prompt_lote(textos_en, textos_es, instrucoes_voz, glossario_final)
+    logger.info("Batch prompt com %s entradas; contem ES: %s", len(textos_en), any((t or "").strip() for t in textos_es))
+    logger.info("Batch prompt preview: %s", prompt[:800].replace("\n", "\\n"))
+    if any((t or "").strip() for t in textos_es):
+        print(f"[translator] batch_spanish_reference_preview: {(textos_es[0] or '')[:220]}")
+
+    try:
+        data = _gerar_e_parsear_json(client, model_name, prompt)
+    except TranslationAPIError:
+        raise
+    except Exception as exc:
+        raise TranslationAPIError("Falha ao comunicar com o Gemini.") from exc
+
+    items = _coerce_to_response_list(data)
+    if len(items) != len(textos_en):
+        raise TranslationResponseError(
+            f"Quantidade de itens no lote divergente: esperado={len(textos_en)}, recebido={len(items)}."
+        )
+
+    resultados = []
+    for i, data_obj in enumerate(items):
+        res = normalizar_resposta(data_obj)
+        texto_en = textos_en[i]
+        res["traducao_padrao"] = normalizar_aspas_para_ascii(res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = normalizar_aspas_para_ascii(res.get("traducao_feminina", ""))
+        res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
+        res["traducao_padrao"] = preservar_aspas_com_base_no_en(texto_en, res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = sanitizar_tags_glossario(texto_en, res.get("traducao_feminina", ""))
+        res["traducao_feminina"] = preservar_aspas_com_base_no_en(texto_en, res.get("traducao_feminina", ""))
+        res["traducao_feminina"] = normalizar_traducao_feminina(
+            res.get("traducao_padrao", ""),
+            res.get("traducao_feminina", ""),
+        )
+        resultados.append(res)
+
+    return resultados
 
 
 def sugerir_traducao_glossario(client, model_name: str, termo_en: str, termo_es: str = "") -> str:
