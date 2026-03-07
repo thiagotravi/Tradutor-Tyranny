@@ -144,6 +144,7 @@ def persist_run_state():
     if not has_meaningful_state:
         return
     save_run_state(state)
+    st.session_state._saved_run_state = state
 
 
 def _aplicar_estado(saved: dict, force: bool = False):
@@ -426,9 +427,6 @@ def render_directory_selector():
             st.rerun()
     with col_stop:
         if st.button("Parar lote"):
-            st.session_state.batch_active = False
-            st.session_state.batch_queue = []
-            st.session_state.batch_cursor = 0
             st.session_state.run_mode = "paused"
             st.session_state.stop_requested = True
             st.rerun()
@@ -697,6 +695,12 @@ if st.session_state.get("stop_requested"):
     st.stop()
 
 while st.session_state.idx < len(st.session_state.entries):
+    if st.session_state.get("stop_requested"):
+        st.session_state.run_mode = "paused"
+        persist_run_state()
+        st.info("Parada solicitada. Processo pausado.")
+        st.stop()
+
     idx = st.session_state.idx
     total_entries = len(st.session_state.entries)
     chunk_start = idx
@@ -706,6 +710,12 @@ while st.session_state.idx < len(st.session_state.entries):
 
     missing_cache_indexes = [i for i in range(chunk_start, chunk_end) if i not in st.session_state.cache]
     if missing_cache_indexes:
+        if st.session_state.get("stop_requested"):
+            st.session_state.run_mode = "paused"
+            persist_run_state()
+            st.info("Parada solicitada antes da chamada de API. Processo pausado.")
+            st.stop()
+
         es_entries = st.session_state.get("es_entries")
         textos_en_lote = []
         textos_es_lote = []
@@ -751,6 +761,12 @@ while st.session_state.idx < len(st.session_state.entries):
 
     audit_flagged_in_chunk = 0
     while st.session_state.idx < chunk_end:
+        if st.session_state.get("stop_requested"):
+            st.session_state.run_mode = "paused"
+            persist_run_state()
+            st.info("Parada solicitada durante o processamento do lote. Processo pausado.")
+            st.stop()
+
         idx = st.session_state.idx
         entry = st.session_state.entries[idx]
         txt_node = entry.find("DefaultText")
