@@ -3,6 +3,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from app_core.context_rules import obter_contexto_voz
 from app_core.filesystem import (
@@ -23,6 +24,7 @@ from app_core.translator import (
 )
 from app_core.validation import precisa_auditoria, validar_traducao_com_es
 from app_core.run_state import load_run_state, save_run_state
+from app_core.batch_worker import TranslationWorker
 from translation_progress import ProgressManager
 from app_core.glossary import (
     carregar_glossario_usuario,
@@ -143,8 +145,74 @@ def persist_run_state():
     )
     if not has_meaningful_state:
         return
-    save_run_state(state)
-    st.session_state._saved_run_state = state
+    merged = load_run_state()
+    merged.update(state)
+    save_run_state(merged)
+    st.session_state._saved_run_state = merged
+
+
+@st.cache_resource
+def get_translation_worker():
+    return TranslationWorker()
+
+
+def render_worker_monitor(worker: TranslationWorker):
+    state = load_run_state().get("worker", {})
+    status = worker.get_status()
+    state = {**state, **status}
+    running = state.get("state") in {"running", "stopping"} and bool(state.get("running", False))
+
+    if running:
+        total = int(state.get("total_files", 0) or 0)
+        completed = int(state.get("completed_files", 0) or 0)
+        queue_index = int(state.get("queue_index", 0) or 0)
+        current = state.get("current_relpath") or state.get("current_file") or "-"
+        entry_total = int(state.get("entry_total", 0) or 0)
+        entry_idx = int(state.get("entry_idx", 0) or 0)
+        chunk_start = int(state.get("chunk_start", 0) or 0)
+        chunk_end = int(state.get("chunk_end", 0) or 0)
+        st.info("Tradução em Andamento...")
+        st.caption(f"Arquivo atual ({queue_index}/{max(total, 1)}): `{current}`")
+        if entry_total > 0:
+            if chunk_start > 0 and chunk_end > 0:
+                st.caption(
+                    f"Lote atual de entradas: `{chunk_start}-{chunk_end}` "
+                    f"(progresso no arquivo: {entry_idx}/{entry_total})"
+                )
+            else:
+                st.caption(f"Progresso no arquivo: `{entry_idx}/{entry_total}`")
+        st.progress((completed / max(total, 1)) if total else 0.0)
+        st.caption(f"{completed} de {total} arquivo(s) finalizado(s)")
+        if st.button("Parar", key="worker_stop_button"):
+            worker.request_stop()
+            st.rerun()
+        col_refresh_now, col_refresh_auto = st.columns(2)
+        with col_refresh_now:
+            if st.button("Atualizar status agora", key="worker_refresh_now"):
+                st.rerun()
+        with col_refresh_auto:
+            auto_refresh = st.checkbox(
+                "Atualizacao automatica (5s)",
+                value=False,
+                key="worker_auto_refresh",
+            )
+        if auto_refresh:
+            components.html(
+                """
+                <script>
+                  setTimeout(function() {
+                    window.parent.location.reload();
+                  }, 5000);
+                </script>
+                """,
+                height=0,
+            )
+            st.caption("Atualizacao automatica ativa.")
+    elif state.get("state") == "error":
+        st.error("Worker finalizado com erro.")
+        st.caption(f"Detalhe tecnico: {state.get('error', '-')}")
+    elif state.get("state") == "completed":
+        st.success("Worker concluido.")
 
 
 def _aplicar_estado(saved: dict, force: bool = False):
@@ -194,7 +262,7 @@ def aplicar_estado_salvo_no_session():
     st.session_state._run_state_loaded = True
 
 
-def render_resume_controls():
+def render_resume_controls(worker: TranslationWorker):
     saved = st.session_state.get("_saved_run_state", {})
     if not saved:
         return
@@ -215,8 +283,29 @@ def render_resume_controls():
     with col1:
         if st.button("Retomar de onde parou", key="resume_previous_run"):
             _aplicar_estado(saved, force=True)
-            st.session_state.run_mode = "running"
+            st.session_state.run_mode = "standby"
             st.session_state.stop_requested = False
+            if st.session_state.get("source_mode", "Diretorio") == "Diretorio":
+                saved_queue = list(saved.get("batch_queue") or [])
+                saved_cursor = int(saved.get("batch_cursor", 0) or 0)
+                if saved_queue and saved_cursor < len(saved_queue):
+                    queue = saved_queue[saved_cursor:]
+                else:
+                    queue = saved_queue
+
+                config = {
+                    "source_en_root": saved.get("source_en_root", st.session_state.get("source_en_root", "")),
+                    "source_es_root": saved.get("source_es_root", st.session_state.get("source_es_root", "")),
+                    "output_root": saved.get("output_root", st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR"))),
+                    "queue": queue,
+                    "batch_size": BATCH_SIZE,
+                    "generate_zip": True,
+                }
+                started, msg = worker.start(config)
+                if started:
+                    st.success("Retomada iniciada em background.")
+                else:
+                    st.warning(msg)
             st.session_state._resume_applied = True
             persist_run_state()
             st.rerun()
@@ -396,6 +485,7 @@ def render_directory_selector():
         return None
 
     labels = [o[0] for o in opcoes]
+    st.session_state.filtered_file_paths = [full for _, full in opcoes]
     selected_file_saved = st.session_state.get("selected_file_path")
     if selected_file_saved:
         for rel_label, full_path in opcoes:
@@ -405,60 +495,6 @@ def render_directory_selector():
     selected_label = st.selectbox("Arquivo para traduzir", labels, key="selected_relpath")
     selected_map = dict(opcoes)
     selected_file_path = selected_map[selected_label]
-
-    col_single, col_start, col_stop = st.columns(3)
-    with col_single:
-        if st.button("Iniciar arquivo selecionado"):
-            st.session_state.batch_active = False
-            st.session_state.batch_queue = []
-            st.session_state.batch_cursor = 0
-            st.session_state.run_mode = "running"
-            st.session_state.stop_requested = False
-            st.session_state.selected_file_path = selected_file_path
-            st.rerun()
-    with col_start:
-        if st.button("Iniciar lote (arquivos filtrados)"):
-            st.session_state.batch_queue = [full for _, full in opcoes]
-            st.session_state.batch_cursor = 0
-            st.session_state.batch_active = len(st.session_state.batch_queue) > 0
-            st.session_state.batch_zip_path = ""
-            st.session_state.run_mode = "running"
-            st.session_state.stop_requested = False
-            st.rerun()
-    with col_stop:
-        if st.button("Parar lote"):
-            st.session_state.run_mode = "paused"
-            st.session_state.stop_requested = True
-            st.rerun()
-
-    if st.button("Processar Próximo Arquivo Automaticamente"):
-        queue = list(st.session_state.get("discovered_files", []))
-        if queue:
-            start_idx = queue.index(selected_file_path) if selected_file_path in queue else 0
-            st.session_state.batch_queue = queue
-            st.session_state.batch_cursor = start_idx
-            st.session_state.batch_active = True
-            st.session_state.batch_zip_path = ""
-            st.session_state.run_mode = "running"
-            st.session_state.stop_requested = False
-            st.rerun()
-
-    if st.session_state.get("batch_active"):
-        queue = st.session_state.get("batch_queue", [])
-        cursor = st.session_state.get("batch_cursor", 0)
-        if not queue or cursor >= len(queue):
-            st.session_state.batch_active = False
-            st.session_state.batch_queue = []
-            st.session_state.batch_cursor = 0
-            st.success("Lote concluido.")
-            st.session_state.selected_file_path = selected_file_path
-            return selected_file_path
-
-        current_file = queue[cursor]
-        current_rel = relpath_display(Path(current_file), source_en_root)
-        st.info(f"Lote ativo: {cursor + 1}/{len(queue)} - {current_rel}")
-        st.session_state.selected_file_path = current_file
-        return current_file
 
     st.session_state.selected_file_path = selected_file_path
     return selected_file_path
@@ -788,8 +824,9 @@ if "_prefer_audit_tab_once" not in st.session_state:
 
 aplicar_estado_salvo_no_session()
 
+worker = get_translation_worker()
 render_sidebar_progress()
-render_resume_controls()
+render_resume_controls(worker)
 client, model_name = init_translation_client()
 
 audit_pending = len(st.session_state.progresso.get_audit_items())
@@ -806,7 +843,7 @@ else:
 with tab_audit:
     render_audit_queue_section()
 
-def render_translation_workspace(client, model_name):
+def render_translation_workspace(client, model_name, worker: TranslationWorker):
     source_mode = st.radio(
         "Modo de entrada",
         options=["Diretorio", "Arquivo unico (legado)"],
@@ -834,6 +871,78 @@ def render_translation_workspace(client, model_name):
 
     if source_mode == "Diretorio":
         if not render_glossary_step(client, model_name):
+            persist_run_state()
+            st.stop()
+
+        worker_state = load_run_state().get("worker", {})
+        worker_running = (
+            worker.is_running()
+            or (
+                worker_state.get("state") in {"running", "stopping"}
+                and bool(worker_state.get("running", False))
+            )
+        )
+        filtered_queue = list(st.session_state.get("filtered_file_paths", []))
+        all_discovered = list(st.session_state.get("discovered_files", []))
+        selected_for_start = st.session_state.get("selected_file_path")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if not worker_running:
+                if st.button("Iniciar Lote", key="worker_start_filtered"):
+                    queue = filtered_queue or all_discovered
+                    config = {
+                        "source_en_root": st.session_state.get("source_en_root", ""),
+                        "source_es_root": st.session_state.get("source_es_root", ""),
+                        "output_root": st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
+                        "queue": queue,
+                        "batch_size": BATCH_SIZE,
+                        "generate_zip": True,
+                    }
+                    started, msg = worker.start(config)
+                    if started:
+                        st.session_state.run_mode = "standby"
+                        st.session_state.stop_requested = False
+                        st.success("Worker iniciado em background.")
+                    else:
+                        st.warning(msg)
+                    st.rerun()
+        with c2:
+            if not worker_running:
+                if st.button("Iniciar Lote do arquivo selecionado", key="worker_start_from_selected"):
+                    base_queue = filtered_queue or all_discovered
+                    if selected_for_start in base_queue:
+                        start_idx = base_queue.index(selected_for_start)
+                        queue = base_queue[start_idx:]
+                    else:
+                        queue = base_queue
+                    config = {
+                        "source_en_root": st.session_state.get("source_en_root", ""),
+                        "source_es_root": st.session_state.get("source_es_root", ""),
+                        "output_root": st.session_state.get("output_root", str(Path.cwd() / "build" / "pt-BR")),
+                        "queue": queue,
+                        "batch_size": BATCH_SIZE,
+                        "generate_zip": True,
+                    }
+                    started, msg = worker.start(config)
+                    if started:
+                        st.session_state.run_mode = "standby"
+                        st.session_state.stop_requested = False
+                        st.success("Worker iniciado em background.")
+                    else:
+                        st.warning(msg)
+                    st.rerun()
+        with c3:
+            if worker_running and st.button("Parar", key="worker_stop_inline"):
+                worker.request_stop()
+                st.rerun()
+
+        if worker_running:
+            render_worker_monitor(worker)
+            persist_run_state()
+            st.stop()
+        else:
+            st.info("Aplicacao em standby. Use 'Iniciar Lote' para executar em background.")
             persist_run_state()
             st.stop()
 
@@ -1096,4 +1205,4 @@ with tab_translate:
     if st.session_state.get("_resume_applied"):
         st.success("Retomando processo salvo anteriormente.")
         st.session_state._resume_applied = False
-    render_translation_workspace(client, model_name)
+    render_translation_workspace(client, model_name, worker)
