@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import streamlit as st
 import streamlit.components.v1 as components
 
+from app_core.instance_lock import InstanceAlreadyRunningError, ensure_single_instance
 from app_core.context_rules import obter_contexto_voz
 from app_core.filesystem import (
     descobrir_arquivos_stringtable,
@@ -37,6 +38,27 @@ from app_core.glossary import (
 
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 20
+
+
+@st.cache_resource
+def get_app_instance_lock():
+    return ensure_single_instance()
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("Relatório Final do Lote")
+    def _show_final_report_dialog(report: dict):
+        st.write(f"Arquivos concluídos: **{report.get('completed', 0)} / {report.get('total', 0)}**")
+        st.write(f"Pendentes de auditoria: **{report.get('audit_pending', 0)}**")
+        st.write(f"Arquivos pulados por falha de rede/API: **{report.get('failed_count', 0)}**")
+        zip_path = report.get("zip_path")
+        if zip_path:
+            st.caption(f"Pacote ZIP: `{zip_path}`")
+        failed_files = report.get("failed_files") or []
+        if failed_files:
+            st.markdown("**Arquivos com falha (amostra):**")
+            for item in failed_files[:10]:
+                st.write(f"- {item.get('file')} (entrada {item.get('at_entry', '-')})")
 
 
 def init_translation_client():
@@ -183,6 +205,11 @@ def render_worker_monitor(worker: TranslationWorker):
                 st.caption(f"Progresso no arquivo: `{entry_idx}/{entry_total}`")
         st.progress((completed / max(total, 1)) if total else 0.0)
         st.caption(f"{completed} de {total} arquivo(s) finalizado(s)")
+        failed = state.get("failed_files") or []
+        if failed:
+            st.warning(f"Arquivos com falha de rede/API ate agora: {len(failed)} (o worker continua processando).")
+            if state.get("last_warning"):
+                st.caption(f"Ultimo aviso: {state.get('last_warning')}")
         if st.button("Parar", key="worker_stop_button"):
             worker.request_stop()
             st.rerun()
@@ -213,6 +240,28 @@ def render_worker_monitor(worker: TranslationWorker):
         st.caption(f"Detalhe tecnico: {state.get('error', '-')}")
     elif state.get("state") == "completed":
         st.success("Worker concluido.")
+        failed = state.get("failed_files") or []
+        if failed:
+            st.warning(f"Concluido com {len(failed)} arquivo(s) pulado(s) por falha de rede/API.")
+        total, completed, _ = st.session_state.progresso.get_stats()
+        report_token = f"{state.get('started_at')}-{state.get('updated_at')}-{completed}-{total}"
+        if st.session_state.get("_last_report_token") != report_token:
+            st.session_state._last_report_token = report_token
+            report = {
+                "total": total,
+                "completed": completed,
+                "audit_pending": len(st.session_state.progresso.get_audit_items()),
+                "failed_count": len(failed),
+                "failed_files": failed,
+                "zip_path": state.get("batch_zip_path"),
+            }
+            if hasattr(st, "dialog"):
+                _show_final_report_dialog(report)
+            else:
+                st.info("Relatório Final do Lote")
+                st.write(f"Arquivos concluídos: {completed}/{total}")
+                st.write(f"Pendentes de auditoria: {report['audit_pending']}")
+                st.write(f"Arquivos pulados por falha de rede/API: {report['failed_count']}")
 
 
 def _aplicar_estado(saved: dict, force: bool = False):
@@ -443,6 +492,17 @@ def render_directory_selector():
     if not arquivos:
         st.info("Informe um diretorio valido e clique em carregar.")
         return None
+
+    # Reconstrói checklist de progresso com base no conjunto atual de arquivos EN.
+    rebuild_sig = (
+        str(source_en_root or ""),
+        len(arquivos),
+        str(arquivos[0]) if arquivos else "",
+        str(arquivos[-1]) if arquivos else "",
+    )
+    if st.session_state.get("_progress_rebuild_sig") != rebuild_sig:
+        st.session_state.progresso.rebuild_from_discovered_files(arquivos, source_en_root or "")
+        st.session_state._progress_rebuild_sig = rebuild_sig
 
     st.caption(f"Source EN detectado: `{source_en_root}`")
     st.caption(f"Arquivos encontrados em EN: {len(arquivos)}")
@@ -779,6 +839,18 @@ def render_audit_queue_section():
 st.set_page_config(page_title="Tyranny Localizer v0.7", layout="wide")
 st.title("Estacao Seladestinos v0.7")
 
+try:
+    get_app_instance_lock()
+except InstanceAlreadyRunningError as exc:
+    st.error("Outra instância do app já está ativa.")
+    st.caption(f"PID ativo: `{exc.pid}`")
+    st.caption("Feche a outra instância antes de iniciar uma nova.")
+    st.stop()
+except Exception as exc:
+    st.error("Falha ao validar lock de instância única.")
+    st.caption(f"Detalhe tecnico: {exc}")
+    st.stop()
+
 if "progresso" not in st.session_state:
     st.session_state.progresso = ProgressManager()
 if "cache" not in st.session_state:
@@ -821,6 +893,10 @@ if "audit_selected_case" not in st.session_state:
     st.session_state.audit_selected_case = None
 if "_prefer_audit_tab_once" not in st.session_state:
     st.session_state._prefer_audit_tab_once = False
+if "_progress_rebuild_sig" not in st.session_state:
+    st.session_state._progress_rebuild_sig = None
+if "_last_report_token" not in st.session_state:
+    st.session_state._last_report_token = ""
 
 aplicar_estado_salvo_no_session()
 

@@ -140,3 +140,7 @@ def validar_traducao_com_es(texto_en: str, texto_es: str, texto_pt: str):
     has_block = any(i["severity"] == "block" for i in issues)
     status = "block" if has_block else ("review" if issues else "ok")
     return {"status": status, "issues": issues}
+
+
+def precisa_auditoria(confianca: int, validation_status: str):
+    return (confianca or 0) < 8 or validation_status in {"review", "block"}

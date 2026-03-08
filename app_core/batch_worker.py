@@ -107,12 +107,33 @@ class TranslationWorker:
 
     def _run(self, config: dict):
         source_en_root = str(config.get("source_en_root") or "")
+        if not source_en_root:
+            source_en_root = str(load_run_state().get("source_en_root") or "")
         source_es_root = str(config.get("source_es_root") or "")
         output_root = str(config.get("output_root") or "")
         queue = list(config.get("queue") or [])
         batch_size = int(config.get("batch_size") or 20)
         generate_zip = bool(config.get("generate_zip", True))
         progresso = ProgressManager()
+        failed_files: list[dict] = []
+
+        known_progress_keys = set(str(k) for k in getattr(progresso, "progress", {}).keys())
+
+        def resolve_progress_key(source_path: Path, rel_key: str) -> str:
+            if rel_key in known_progress_keys:
+                return rel_key
+            abs_key = str(source_path)
+            if abs_key in known_progress_keys:
+                return abs_key
+            rel_low = rel_key.lower()
+            direct_suffix = [k for k in known_progress_keys if k.lower().endswith(rel_low)]
+            if len(direct_suffix) == 1:
+                return direct_suffix[0]
+            contained_suffix = [k for k in known_progress_keys if rel_low.endswith(k.lower())]
+            if len(contained_suffix) == 1:
+                return contained_suffix[0]
+            # fallback: evita inflar o contador com caminhos absolutos inconsistentes
+            return rel_key
 
         try:
             api_key = obter_api_key()
@@ -131,12 +152,13 @@ class TranslationWorker:
 
                 source_path = Path(source_file)
                 rel_key = relpath_display(source_path, source_en_root) if source_en_root else str(source_path)
+                progress_key = resolve_progress_key(source_path, rel_key)
                 tree = ET.parse(source_path)
                 root = tree.getroot()
                 entries = root.findall(".//Entry")
                 self._set_status(
                     current_file=str(source_path),
-                    current_relpath=rel_key,
+                    current_relpath=progress_key,
                     queue_index=file_pos,
                     entry_total=len(entries),
                     entry_idx=0,
@@ -212,7 +234,26 @@ class TranslationWorker:
                             delay_s = 1.5 * (2 ** (attempt - 1))
                             time.sleep(min(delay_s, 12.0))
                     if lote_res is None:
-                        raise RuntimeError(f"Falha de rede/API ao processar lote de {rel_key}: {last_exc}")
+                        failed_files.append(
+                            {
+                                "file": progress_key,
+                                "error": str(last_exc),
+                                "at_entry": idx,
+                            }
+                        )
+                        self._write_worker_state(
+                            {
+                                "failed_files": failed_files,
+                                "last_warning": f"Falha de rede/API em {progress_key}; arquivo pulado.",
+                            }
+                        )
+                        logger.warning(
+                            "Falha de rede/API no arquivo %s (entrada %s). Pulando arquivo. erro=%s",
+                            progress_key,
+                            idx,
+                            last_exc,
+                        )
+                        break
 
                     for offset, i in enumerate(range(idx, chunk_end)):
                         res = lote_res[offset]
@@ -244,7 +285,7 @@ class TranslationWorker:
                         if needs_audit:
                             progresso.add_or_update_audit_item(
                                 {
-                                    "file": rel_key,
+                                    "file": progress_key,
                                     "entry_idx": i,
                                     "needs_audit": True,
                                     "confidence": int(res.get("confianca", 0) or 0),
@@ -258,10 +299,14 @@ class TranslationWorker:
                                 }
                             )
                         else:
-                            progresso.clear_audit_item(rel_key, i)
+                            progresso.clear_audit_item(progress_key, i)
                     idx = chunk_end
                     self._set_status(entry_idx=idx)
                     self._write_worker_state()
+
+                if failed_files and failed_files[-1].get("file") == progress_key and idx < len(entries):
+                    # arquivo pulado por falha de rede/API; segue para o proximo
+                    continue
 
                 salvar_xml_traduzido(
                     tree=tree,
@@ -269,10 +314,10 @@ class TranslationWorker:
                     source_en_root=source_en_root,
                     output_root=output_root,
                 )
-                progresso.update_status(rel_key, True)
+                progresso.update_status(progress_key, True)
                 completed += 1
                 self._set_status(completed_files=completed, entry_idx=len(entries))
-                self._write_worker_state({"last_completed_file": rel_key})
+                self._write_worker_state({"last_completed_file": progress_key, "failed_files": failed_files})
 
             if generate_zip:
                 try:
@@ -289,8 +334,8 @@ class TranslationWorker:
                 chunk_start=0,
                 chunk_end=0,
             )
-            self._write_worker_state()
+            self._write_worker_state({"failed_files": failed_files})
         except Exception as exc:
             logger.exception("Erro no TranslationWorker")
             self._set_status(running=False, state="error", error=str(exc))
-            self._write_worker_state()
+            self._write_worker_state({"failed_files": failed_files})
