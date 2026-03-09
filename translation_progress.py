@@ -23,6 +23,7 @@ class ProgressManager:
             self.save_path = save_path
         else:
             self.save_path = default_save_path if os.path.exists(default_save_path) else legacy_save_path
+        self.lastgood_path = f"{self.save_path}.lastgood"
 
         # Garante que a pasta de destino existe para salvar progresso.
         save_dir = os.path.dirname(self.save_path)
@@ -66,7 +67,14 @@ class ProgressManager:
             except json.JSONDecodeError:
                 # Mantém o app funcional mesmo com JSON parcial/corrompido.
                 self._backup_corrupted_progress_file()
-                return self._build_progress_from_xml(), []
+                if os.path.exists(self.lastgood_path):
+                    try:
+                        with open(self.lastgood_path, "r", encoding="utf-8") as f:
+                            raw = json.load(f)
+                    except Exception:
+                        return self._build_progress_from_xml(), []
+                else:
+                    return self._build_progress_from_xml(), []
             except Exception:
                 return self._build_progress_from_xml(), []
 
@@ -99,12 +107,18 @@ class ProgressManager:
             "audit_items": self.audit_items,
         }
         tmp_path = f"{self.save_path}.tmp"
+        tmp_lastgood = f"{self.lastgood_path}.tmp"
         with self._io_lock:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=4, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self.save_path)
+            with open(tmp_lastgood, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_lastgood, self.lastgood_path)
 
     def update_status(self, file_name, status):
         self.progress[file_name] = status
