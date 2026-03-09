@@ -100,6 +100,36 @@ class ProgressManager:
         # Caso contrário, varre o XML pela primeira vez
         return self._build_progress_from_xml(), []
 
+    def reload_from_disk(self):
+        """
+        Recarrega progresso salvo em disco (quando válido), útil para refletir
+        atualizações feitas por worker em background.
+        """
+        if not os.path.exists(self.save_path):
+            return
+        try:
+            with open(self.save_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return
+
+        if isinstance(raw, dict) and "files" in raw:
+            files = raw.get("files", {})
+            audit_items = raw.get("audit_items", [])
+            if isinstance(files, dict) and isinstance(audit_items, list):
+                self.progress = {str(k): bool(v) for k, v in files.items()}
+                self.audit_items = [a for a in audit_items if isinstance(a, dict)]
+                return
+
+        if isinstance(raw, dict):
+            legacy = {
+                str(k): bool(v)
+                for k, v in raw.items()
+                if not str(k).startswith("_") and isinstance(v, (bool, int))
+            }
+            if legacy:
+                self.progress = legacy
+
     def _save(self):
         payload = {
             "schema": "v2",

@@ -562,6 +562,8 @@ def render_directory_selector():
 
 def render_sidebar_progress():
     with st.sidebar:
+        # Sincroniza contadores com atualizações de worker em background.
+        st.session_state.progresso.reload_from_disk()
         st.header("Progresso")
         total, concluidos, percent = st.session_state.progresso.get_stats()
         st.progress(percent / 100)
