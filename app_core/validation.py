@@ -1,4 +1,5 @@
 import re
+from app_core.text_sanitize import strip_bidi_controls
 
 
 MECHANIC_HINTS = {
@@ -58,9 +59,9 @@ def validar_traducao_com_es(texto_en: str, texto_es: str, texto_pt: str):
     Retorna dicionario com status e lista de issues.
     """
     issues = []
-    en = texto_en or ""
-    es = texto_es or ""
-    pt = texto_pt or ""
+    en = strip_bidi_controls(texto_en or "")
+    es = strip_bidi_controls(texto_es or "")
+    pt = strip_bidi_controls(texto_pt or "")
 
     placeholders_en = _extract_placeholders(en)
     placeholders_pt = _extract_placeholders(pt)

@@ -10,6 +10,7 @@ from app_core.glossary import obter_glossario_completo, verificar_termos_faltant
 from app_core.output_packaging import gerar_zip_da_saida, salvar_xml_traduzido
 from app_core.run_state import load_run_state, save_run_state
 from app_core.settings import criar_client, obter_api_key, obter_model_name
+from app_core.text_sanitize import strip_bidi_controls
 from app_core.translator import TranslationAPIError, processar_lote_entrada, normalizar_traducao_feminina
 from app_core.validation import precisa_auditoria, validar_traducao_com_es
 from translation_progress import ProgressManager
@@ -153,6 +154,23 @@ class TranslationWorker:
                 source_path = Path(source_file)
                 rel_key = relpath_display(source_path, source_en_root) if source_en_root else str(source_path)
                 progress_key = resolve_progress_key(source_path, rel_key)
+
+                # Evita retraduzir/sobrescrever arquivos ja concluidos em execucoes anteriores.
+                if bool(getattr(progresso, "progress", {}).get(progress_key, False)):
+                    completed += 1
+                    self._set_status(
+                        current_file=str(source_path),
+                        current_relpath=progress_key,
+                        queue_index=file_pos,
+                        entry_total=0,
+                        entry_idx=0,
+                        chunk_start=0,
+                        chunk_end=0,
+                        completed_files=completed,
+                    )
+                    self._write_worker_state({"last_completed_file": progress_key})
+                    continue
+
                 tree = ET.parse(source_path)
                 root = tree.getroot()
                 entries = root.findall(".//Entry")
@@ -199,12 +217,12 @@ class TranslationWorker:
                     textos_es = []
                     for i in range(idx, chunk_end):
                         en_node = entries[i].find("DefaultText")
-                        txt_en = en_node.text if en_node is not None and en_node.text else ""
+                        txt_en = strip_bidi_controls(en_node.text if en_node is not None and en_node.text else "")
                         textos_en.append(txt_en)
                         txt_es = ""
                         if es_entries and i < len(es_entries):
                             es_node = es_entries[i].find("DefaultText")
-                            txt_es = es_node.text if es_node is not None and es_node.text else ""
+                            txt_es = strip_bidi_controls(es_node.text if es_node is not None and es_node.text else "")
                         textos_es.append(txt_es)
 
                     instrucoes = obter_contexto_voz(source_path.name)
@@ -259,13 +277,15 @@ class TranslationWorker:
                         res = lote_res[offset]
                         entry = entries[i]
                         en_node = entry.find("DefaultText")
-                        txt_en = en_node.text if en_node is not None and en_node.text else ""
+                        txt_en = strip_bidi_controls(en_node.text if en_node is not None and en_node.text else "")
                         txt_es = textos_es[offset]
+                        trad_padrao = strip_bidi_controls(res.get("traducao_padrao", ""))
+                        trad_feminina = strip_bidi_controls(res.get("traducao_feminina", ""))
                         faltantes = verificar_termos_faltantes(txt_en)
                         validacao = validar_traducao_com_es(
                             texto_en=txt_en,
                             texto_es=txt_es,
-                            texto_pt=res.get("traducao_padrao", ""),
+                            texto_pt=trad_padrao,
                         )
                         needs_audit = precisa_auditoria(
                             int(res.get("confianca", 0) or 0),
@@ -273,12 +293,12 @@ class TranslationWorker:
                         ) or bool(faltantes)
 
                         if en_node is not None:
-                            en_node.text = res.get("traducao_padrao", "")
+                            en_node.text = trad_padrao
                         fem_node = entry.find("FemaleText")
                         if fem_node is not None:
                             fem_final = normalizar_traducao_feminina(
-                                res.get("traducao_padrao", ""),
-                                res.get("traducao_feminina", ""),
+                                trad_padrao,
+                                trad_feminina,
                             )
                             fem_node.text = fem_final if fem_final else None
 
@@ -294,8 +314,8 @@ class TranslationWorker:
                                     "missing_terms": faltantes,
                                     "original_en": txt_en,
                                     "reference_es": txt_es,
-                                    "translated_pt": res.get("traducao_padrao", ""),
-                                    "translated_feminine": res.get("traducao_feminina", ""),
+                                    "translated_pt": trad_padrao,
+                                    "translated_feminine": trad_feminina,
                                 }
                             )
                         else:

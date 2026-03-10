@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from app_core.glossary import obter_glossario_completo
 from app_core.settings import criar_client, obter_api_key, obter_model_name
 from app_core.translator import extrair_json_resposta
+from audit_core.text_sanitize import strip_bidi_controls
 
 
 CHECK_IDS = ("tags", "quotes", "glossary", "female", "brackets")
@@ -214,11 +215,15 @@ def validate_entry_with_gemini(
         raise RuntimeError("GEMINI_API_KEY nao configurada.")
     client = criar_client(api_key)
     model_name = obter_model_name()
+    clean_en = strip_bidi_controls(text_en or "")
+    clean_ref = strip_bidi_controls(text_ref or "")
+    clean_pt = strip_bidi_controls(text_pt or "")
+    clean_female = strip_bidi_controls(text_female or "")
     prompt = _build_prompt(
-        text_en=text_en,
-        text_ref=text_ref,
-        text_pt=text_pt,
-        text_female=text_female,
+        text_en=clean_en,
+        text_ref=clean_ref,
+        text_pt=clean_pt,
+        text_female=clean_female,
         ref_language=(ref_language or "es").lower(),
         glossary=obter_glossario_completo(),
     )
@@ -254,6 +259,12 @@ def ask_gemini_audit_chat(
         history_lines.append(f"{role_label}: {content}")
     history_block = "\n".join(history_lines).strip()
 
+    clean_en = strip_bidi_controls(text_en or "")
+    clean_ref = strip_bidi_controls(text_ref or "")
+    clean_pt = strip_bidi_controls(text_pt or "")
+    clean_female = strip_bidi_controls(text_female or "")
+    clean_question = strip_bidi_controls(question or "")
+
     prompt = f"""
 Voce e um assistente de auditoria de traducao PT-BR para Tyranny.
 Ajude o usuario a decidir a melhor traducao para a entrada atual.
@@ -267,22 +278,22 @@ Regras:
 
 Contexto da entrada:
 <english>
-{text_en or ""}
+{clean_en}
 </english>
 <reference language="{(ref_language or "es").lower()}">
-{text_ref or ""}
+{clean_ref}
 </reference>
 <pt_default>
-{text_pt or ""}
+{clean_pt}
 </pt_default>
 <pt_female>
-{text_female or ""}
+{clean_female}
 </pt_female>
 
 Historico recente:
 {history_block or "(sem historico)"}
 
 Pergunta do usuario:
-{question or ""}
+{clean_question}
 """
     return _call_model_text(client, model_name, prompt)

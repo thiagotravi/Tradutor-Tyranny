@@ -4,6 +4,7 @@ import re
 import time
 from config_traducao import GUIA_ESTILO
 from app_core.glossary import obter_glossario_completo
+from app_core.text_sanitize import strip_bidi_controls
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,8 @@ def processar_entrada(
     instrucoes_voz: str,
     glossario: dict | None = None,
 ):
+    texto_en = strip_bidi_controls(texto_en or "")
+    texto_es = strip_bidi_controls(texto_es or "")
     if not texto_en or texto_en.strip() == "":
         return {"traducao_padrao": "", "traducao_feminina": "", "confianca": 10}
 
@@ -380,6 +383,8 @@ def processar_entrada(
 
     def _normalizar_final(data_obj):
         res = normalizar_resposta(data_obj)
+        res["traducao_padrao"] = strip_bidi_controls(res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = strip_bidi_controls(res.get("traducao_feminina", ""))
         res["traducao_padrao"] = normalizar_aspas_para_ascii(res.get("traducao_padrao", ""))
         res["traducao_feminina"] = normalizar_aspas_para_ascii(res.get("traducao_feminina", ""))
         res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))
@@ -463,6 +468,11 @@ def processar_lote_entrada(
     if not textos_en:
         return []
 
+    textos_en = [strip_bidi_controls(t or "") for t in textos_en]
+    textos_es = [strip_bidi_controls(t or "") for t in (textos_es or [])]
+    if len(textos_es) < len(textos_en):
+        textos_es.extend([""] * (len(textos_en) - len(textos_es)))
+
     glossario_final = glossario or obter_glossario_completo()
     prompt = montar_prompt_lote(textos_en, textos_es, instrucoes_voz, glossario_final)
     logger.info("Batch prompt com %s entradas; contem ES: %s", len(textos_en), any((t or "").strip() for t in textos_es))
@@ -487,6 +497,8 @@ def processar_lote_entrada(
     for i, data_obj in enumerate(items):
         res = normalizar_resposta(data_obj)
         texto_en = textos_en[i]
+        res["traducao_padrao"] = strip_bidi_controls(res.get("traducao_padrao", ""))
+        res["traducao_feminina"] = strip_bidi_controls(res.get("traducao_feminina", ""))
         res["traducao_padrao"] = normalizar_aspas_para_ascii(res.get("traducao_padrao", ""))
         res["traducao_feminina"] = normalizar_aspas_para_ascii(res.get("traducao_feminina", ""))
         res["traducao_padrao"] = sanitizar_tags_glossario(texto_en, res.get("traducao_padrao", ""))

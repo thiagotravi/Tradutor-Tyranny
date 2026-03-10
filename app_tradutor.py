@@ -16,6 +16,7 @@ from app_core.filesystem import (
 from app_core.glossary import verificar_termos_faltantes
 from app_core.output_packaging import caminho_saida_espelho, gerar_zip_da_saida, salvar_xml_traduzido
 from app_core.settings import criar_client, obter_api_key, obter_model_name
+from app_core.text_sanitize import strip_bidi_controls
 from app_core.translator import (
     TranslationAPIError,
     TranslationResponseError,
@@ -1156,19 +1157,21 @@ def render_translation_workspace(client, model_name, worker: TranslationWorker):
             idx = st.session_state.idx
             entry = st.session_state.entries[idx]
             txt_node = entry.find("DefaultText")
-            txt_en = txt_node.text if txt_node is not None and txt_node.text else ""
+            txt_en = strip_bidi_controls(txt_node.text if txt_node is not None and txt_node.text else "")
             txt_es = ""
             es_entries = st.session_state.get("es_entries")
             if es_entries and idx < len(es_entries):
                 es_txt_node = es_entries[idx].find("DefaultText")
-                txt_es = es_txt_node.text if es_txt_node is not None and es_txt_node.text else ""
+                txt_es = strip_bidi_controls(es_txt_node.text if es_txt_node is not None and es_txt_node.text else "")
 
             faltantes = verificar_termos_faltantes(txt_en)
             res = st.session_state.cache[idx]
+            trad_padrao = strip_bidi_controls(res.get("traducao_padrao", ""))
+            trad_feminina = strip_bidi_controls(res.get("traducao_feminina", ""))
             validacao = validar_traducao_com_es(
                 texto_en=txt_en,
                 texto_es=txt_es,
-                texto_pt=res.get("traducao_padrao", ""),
+                texto_pt=trad_padrao,
             )
             needs_audit = precisa_auditoria(
                 int(res.get("confianca", 0) or 0),
@@ -1176,12 +1179,12 @@ def render_translation_workspace(client, model_name, worker: TranslationWorker):
             ) or bool(faltantes)
 
             if txt_node is not None:
-                txt_node.text = res.get("traducao_padrao", "")
+                txt_node.text = trad_padrao
             f_node = entry.find("FemaleText")
             if f_node is not None:
                 fem_final = normalizar_traducao_feminina(
-                    res.get("traducao_padrao", ""),
-                    res.get("traducao_feminina", ""),
+                    trad_padrao,
+                    trad_feminina,
                 )
                 f_node.text = fem_final if fem_final else None
 
@@ -1198,8 +1201,8 @@ def render_translation_workspace(client, model_name, worker: TranslationWorker):
                         "missing_terms": faltantes,
                         "original_en": txt_en,
                         "reference_es": txt_es,
-                        "translated_pt": res.get("traducao_padrao", ""),
-                        "translated_feminine": res.get("traducao_feminina", ""),
+                        "translated_pt": trad_padrao,
+                        "translated_feminine": trad_feminina,
                     }
                 )
             else:

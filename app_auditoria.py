@@ -13,6 +13,7 @@ from audit_core.filemap import (
 from audit_core.gemini_audit import build_audit_report_text, validate_entry_with_gemini
 from audit_core.gemini_audit import ask_gemini_audit_chat
 from audit_core.state import load_post_audit_state, save_post_audit_state
+from audit_core.text_sanitize import strip_bidi_controls
 
 
 def _status_key(file_rel: str, entry_idx: int) -> str:
@@ -262,13 +263,16 @@ with col_pt:
         key=_editor_key("audit_fem", _status_key(rel, entry_idx)),
     )
 
+clean_edit_pt = strip_bidi_controls(edit_pt)
+clean_edit_fem = strip_bidi_controls(edit_fem)
+
 status_now = entry_status.get(_status_key(rel, entry_idx), "pending")
 st.caption(f"Status atual da entrada: `{status_now}`")
 
 validation_results = st.session_state.get("audit_validation_results", {})
 entry_key = _status_key(rel, entry_idx)
 entry_validation = validation_results.get(entry_key, {})
-current_hash = _entry_hash(txt_en, txt_ref, edit_pt, edit_fem)
+current_hash = _entry_hash(txt_en, txt_ref, clean_edit_pt, clean_edit_fem)
 validated_hash = str(entry_validation.get("input_hash", ""))
 is_validation_stale = bool(entry_validation) and validated_hash != current_hash
 
@@ -282,8 +286,8 @@ with col_validate:
                 result = validate_entry_with_gemini(
                     text_en=txt_en,
                     text_ref=txt_ref,
-                    text_pt=edit_pt,
-                    text_female=edit_fem,
+                    text_pt=clean_edit_pt,
+                    text_female=clean_edit_fem,
                     ref_language=st.session_state.audit_ref_language,
                 )
             result["input_hash"] = current_hash
@@ -305,8 +309,8 @@ with col_apply:
     if st.button("Aplicar sugestão", disabled=not can_apply_suggestion):
         suggested_pt = str(entry_validation.get("suggested_fix_pt", "")).strip()
         suggested_fem = str(entry_validation.get("suggested_fix_female", "")).strip()
-        final_pt = suggested_pt if suggested_pt else edit_pt
-        final_fem = suggested_fem if suggested_fem else edit_fem
+        final_pt = suggested_pt if suggested_pt else clean_edit_pt
+        final_fem = suggested_fem if suggested_fem else clean_edit_fem
         try:
             save_entry_in_target_file(str(target_path), entry_idx, final_pt, final_fem)
             # Evita mutacao de key de widget instanciado no mesmo ciclo.
@@ -366,8 +370,8 @@ if chat_question:
                 question=chat_question,
                 text_en=txt_en,
                 text_ref=txt_ref,
-                text_pt=edit_pt,
-                text_female=edit_fem,
+                text_pt=clean_edit_pt,
+                text_female=clean_edit_fem,
                 ref_language=st.session_state.audit_ref_language,
                 history=entry_chat,
             )
@@ -386,11 +390,11 @@ with col_prev:
         st.rerun()
 with col_save:
     if st.button("Salvar edição"):
-        save_entry_in_target_file(str(target_path), entry_idx, edit_pt, edit_fem)
+        save_entry_in_target_file(str(target_path), entry_idx, clean_edit_pt, clean_edit_fem)
         st.success("Edição salva no arquivo de tradução.")
 with col_approve:
     if st.button("Aprovar e próxima"):
-        save_entry_in_target_file(str(target_path), entry_idx, edit_pt, edit_fem)
+        save_entry_in_target_file(str(target_path), entry_idx, clean_edit_pt, clean_edit_fem)
         entry_status[_status_key(rel, entry_idx)] = "approved"
         st.session_state.audit_entry_status = entry_status
         _go_next_entry(len(target_entries), len(rels))

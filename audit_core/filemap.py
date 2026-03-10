@@ -1,6 +1,8 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+from audit_core.text_sanitize import strip_bidi_controls
+
 
 VALID_EXTENSIONS = {".stringtable", ".xml"}
 EXCLUDED_FILENAMES = {"language.xml"}
@@ -34,7 +36,9 @@ def load_entries_from_file(file_path: str):
 
 def get_entry_text(entry, tag: str):
     node = entry.find(tag)
-    return node.text if node is not None and node.text else ""
+    if node is None or not node.text:
+        return ""
+    return strip_bidi_controls(node.text)
 
 
 def save_entry_in_target_file(target_file: str, entry_idx: int, default_text: str, female_text: str):
@@ -44,8 +48,8 @@ def save_entry_in_target_file(target_file: str, entry_idx: int, default_text: st
     entry = entries[entry_idx]
     def_node = entry.find("DefaultText")
     if def_node is not None:
-        def_node.text = default_text or ""
+        def_node.text = strip_bidi_controls(default_text or "")
     fem_node = entry.find("FemaleText")
     if fem_node is not None:
-        fem_node.text = (female_text or "").strip() or None
+        fem_node.text = strip_bidi_controls((female_text or "").strip()) or None
     tree.write(target_file, encoding="utf-8", xml_declaration=True)
